@@ -140,7 +140,7 @@ def populate_ai_grading_prompts():
         print(f"Generating grading logic for row {row_number}...")
         grading_logic = generate_grading_logic(question, answer)
 
-        ws.update_cell(row_number, 6, grading_logic)
+        ws.update_cell(row_number, 6, f"AI: {grading_logic}")
         print(f"Updated grading logic for row {row_number}.")
 
 # Formatting and populating AI logic
