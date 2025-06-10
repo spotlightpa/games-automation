@@ -39,9 +39,8 @@ openai_client = OpenAI(api_key=get_openai_key())
 # Default grading instructions
 GENERIC_GRADING_INSTRUCTIONS = """
 You are tasked with creating concise grading logic to evaluate if a user's answer to a riddle is correct. 
-Be specific about variations or synonyms that should be accepted or rejected. 
-Ignore trivial differences like punctuation, capitalization, or common filler words.
-Provide clear guidance in 1-3 sentences.
+Do not restate these general rules. Assume trivial differences like punctuation, capitalization, or filler words are ignored. 
+Be specific about variations or synonyms that should be accepted or rejected. Provide guidance in 1-3 sentences.
 """
 
 # Google OAuth credential management
