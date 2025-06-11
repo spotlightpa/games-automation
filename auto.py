@@ -172,7 +172,7 @@ def populate_winners_tab():
     # Clear data in rows 3 and below
     last_row = len(winners_ws.get_all_values())
     if last_row >= 3:
-        winners_ws.update(f"A3:F{last_row}", [[""] * 6] * (last_row - 2))
+        winners_ws.update([[""] * 6] * (last_row - 2), f"A3:F{last_row}")
 
     all_rows = []
 
@@ -226,7 +226,7 @@ def populate_winners_tab():
 
     # ✅ Write to row 3 and down only
     if all_rows:
-        winners_ws.update(f"A3:F{2 + len(all_rows)}", all_rows, value_input_option="USER_ENTERED")
+        winners_ws.update(all_rows, f"A3:F{2 + len(all_rows)}", value_input_option="USER_ENTERED")
 
     print(f"✅ Populated {len(all_rows)} winner rows.")
 
