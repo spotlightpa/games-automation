@@ -158,17 +158,23 @@ def populate_winners_tab():
     historical_ws = sheet.worksheet('Historical Submissions')
     winners_ws = sheet.worksheet('Winners')
 
+    # Load Riddles
     riddles_raw = riddles_ws.get_all_values()
     riddles_header = riddles_raw[0]
     riddles_data = rows_to_dicts(riddles_raw[2:], riddles_header)
 
+    # Load Submissions
     sub_header = submissions_ws.get_all_values()[0]
     submissions_data = rows_to_dicts(submissions_ws.get_all_values()[2:], sub_header)
     historical_data = rows_to_dicts(historical_ws.get_all_values()[2:], sub_header)
     all_submissions = submissions_data + historical_data
 
-    # Clear winners data
-    winners_ws.batch_clear(['A3:F'])
+    # Clear data in rows 3 and below
+    last_row = len(winners_ws.get_all_values())
+    if last_row >= 3:
+        winners_ws.update(f"A3:F{last_row}", [[""] * 6] * (last_row - 2))
+
+    all_rows = []
 
     for riddle in riddles_data:
         case_number = riddle.get('Case Number')
@@ -177,6 +183,7 @@ def populate_winners_tab():
         case_number = int(case_number)
         prev_case_number = case_number - 1
 
+        # Previous clue/answer
         prev_riddle = next(
             (r for r in riddles_data if str(r.get('Case Number')) == str(prev_case_number)),
             None
@@ -184,6 +191,7 @@ def populate_winners_tab():
         prev_clue = prev_riddle.get("Question", "").strip() if prev_riddle else ""
         prev_answer = prev_riddle.get("Answer", "").strip() if prev_riddle else ""
 
+        # Correct entries
         correct_entries = [
             e for e in all_submissions
             if str(e.get("Case Number")).isdigit()
@@ -200,8 +208,10 @@ def populate_winners_tab():
         winners_str = ", ".join(winner_names)
         full_text = ""
         if winner_names:
-            others = f" Others who answered correctly: {winners_str}"
-            full_text = f"Congrats to (FIRST LAST INITIAL., skip for now), who will receive Spotlight PA swag.{others}"
+            full_text = (
+                f"Congrats to (FIRST LAST INITIAL., skip for now), who will receive Spotlight PA swag."
+                f" Others who answered correctly: {winners_str}"
+            )
 
         row = [
             case_number,
@@ -212,8 +222,14 @@ def populate_winners_tab():
             full_text
         ]
 
-        winners_ws.append_row(row, value_input_option='USER_ENTERED')
-        print(f"✅ Populated Case #{case_number} with {len(winner_names)} winner(s)")
+        all_rows.append(row)
+
+    # ✅ Write to row 3 and down only
+    if all_rows:
+        winners_ws.update(f"A3:F{2 + len(all_rows)}", all_rows, value_input_option="USER_ENTERED")
+
+    print(f"✅ Populated {len(all_rows)} winner rows.")
+
 
 # Run all steps
 def format_and_populate_all():
