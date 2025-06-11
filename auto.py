@@ -142,15 +142,89 @@ def populate_ai_grading_prompts():
         ws.update_cell(row_number, 6, f"AI: {grading_logic}")
         print(f"Updated grading logic for row {row_number}.")
 
-# Formatting and populating AI logic
+# Helpers
+def rows_to_dicts(data_rows, header):
+    return [dict(zip(header, row)) for row in data_rows if any(cell.strip() for cell in row)]
+
+def is_marked_correct(entry):
+    override = entry.get('Override', '').strip().lower()
+    grade = entry.get('AI Grade', '').strip().lower()
+    return override == 'correct' or (not override and grade == 'correct')
+
+# Populate winners
+def populate_winners_tab():
+    riddles_ws = sheet.worksheet('Riddles')
+    submissions_ws = sheet.worksheet('Submissions')
+    historical_ws = sheet.worksheet('Historical Submissions')
+    winners_ws = sheet.worksheet('Winners')
+
+    riddles_raw = riddles_ws.get_all_values()
+    riddles_header = riddles_raw[0]
+    riddles_data = rows_to_dicts(riddles_raw[2:], riddles_header)
+
+    sub_header = submissions_ws.get_all_values()[0]
+    submissions_data = rows_to_dicts(submissions_ws.get_all_values()[2:], sub_header)
+    historical_data = rows_to_dicts(historical_ws.get_all_values()[2:], sub_header)
+    all_submissions = submissions_data + historical_data
+
+    # Clear winners data
+    winners_ws.batch_clear(['A3:F'])
+
+    for riddle in riddles_data:
+        case_number = riddle.get('Case Number')
+        if not case_number or not str(case_number).isdigit():
+            continue
+        case_number = int(case_number)
+        prev_case_number = case_number - 1
+
+        prev_riddle = next(
+            (r for r in riddles_data if str(r.get('Case Number')) == str(prev_case_number)),
+            None
+        )
+        prev_clue = prev_riddle.get("Question", "").strip() if prev_riddle else ""
+        prev_answer = prev_riddle.get("Answer", "").strip() if prev_riddle else ""
+
+        correct_entries = [
+            e for e in all_submissions
+            if str(e.get("Case Number")).isdigit()
+            and int(e["Case Number"]) == case_number
+            and is_marked_correct(e)
+        ]
+
+        winner_names = sorted({
+            f"{e['First Name']} {e['Last Name Initial']}."
+            for e in correct_entries
+            if e.get('First Name') and e.get('Last Name Initial')
+        })
+
+        winners_str = ", ".join(winner_names)
+        full_text = ""
+        if winner_names:
+            others = f" Others who answered correctly: {winners_str}"
+            full_text = f"Congrats to (FIRST LAST INITIAL., skip for now), who will receive Spotlight PA swag.{others}"
+
+        row = [
+            case_number,
+            "",  # Swag Winner TK
+            winners_str,
+            prev_clue,
+            prev_answer,
+            full_text
+        ]
+
+        winners_ws.append_row(row, value_input_option='USER_ENTERED')
+        print(f"✅ Populated Case #{case_number} with {len(winner_names)} winner(s)")
+
+# Run all steps
 def format_and_populate_all():
     populate_ai_grading_prompts()
     total_rows = len(ws.get_all_values())
     for row in range(3, total_rows + 1):
         write_riddle_with_formatting(row)
+    populate_winners_tab()
 
 # Main entry point
 if __name__ == '__main__':
-    print("Starting full automation: formatting and AI grading logic...")
+    print("Starting full automation: formatting, grading, and winner population...")
     format_and_populate_all()
     print("Automation completed successfully.")
