@@ -1,6 +1,8 @@
 import os
 import yaml
 import gspread
+import re
+
 from openai import OpenAI
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -146,10 +148,94 @@ def populate_ai_grading_prompts():
 def rows_to_dicts(data_rows, header):
     return [dict(zip(header, row)) for row in data_rows if any(cell.strip() for cell in row)]
 
+# Determines if a submission is marked correct (considering override first)
 def is_marked_correct(entry):
-    override = entry.get('Override', '').strip().lower()
-    grade = entry.get('AI Grade', '').strip().lower()
+    override = entry.get('Override', '').strip().lower() if 'Override' in entry else ""
+    grade = entry.get('AI Grade', '').strip().lower() if 'AI Grade' in entry else ""
     return override == 'correct' or (not override and grade == 'correct')
+
+# OpenAI-based grading using per-riddle grading prompt
+def grade_submission_entry(grading_prompt, user_answer):
+    prompt = f"""{grading_prompt.strip()}
+
+    You are grading a riddle submission. Use the information above to determine if the user's answer is correct. Then estimate how confident you are in your judgment — not based on surface similarity, but on how well the answer logically matches the riddle's requirements.
+
+    Use your full reasoning ability and the grading logic to determine confidence, just as a human editor would. Avoid mechanical scoring — your confidence should reflect your actual certainty in the answer being right or wrong.
+
+    Respond in this format exactly:
+    Correctness: Correct or Incorrect
+    Confidence: [number from 0 to 100]
+
+    User's Answer: {user_answer}
+    """
+
+    response = openai_client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0,
+        max_tokens=150
+    )
+
+    content = response.choices[0].message.content.strip()
+
+    match_grade = re.search(r"Correctness:\s*(Correct|Incorrect)", content, re.IGNORECASE)
+    match_conf = re.search(r"Confidence:\s*(\d+)", content)
+
+    if not match_grade or not match_conf:
+        print(f"⚠️ AI response could not be parsed:\n{content}")
+        return "Uncertain", "N/A"
+
+    grade = match_grade.group(1).capitalize()
+    confidence = f"{match_conf.group(1)}%"
+
+    return grade, confidence
+
+# Grade only blank submissions in a sheet
+def grade_submissions_for_sheet(sheet_name):
+    print(f"Grading submissions in sheet: {sheet_name}")
+    ws_sub = sheet.worksheet(sheet_name)
+
+    all_rows = ws_sub.get_all_values()
+    headers = all_rows[0]
+    header_map = {h.strip(): i for i, h in enumerate(headers)}
+
+    required = ["AI Grade", "AI Confidence", "Override"]
+    modified = False
+    for col in required:
+        if col not in header_map:
+            headers.append(col)
+            modified = True
+
+    if modified:
+        ws_sub.update("A1", [headers])
+        header_map = {h.strip(): i for i, h in enumerate(headers)}
+
+    riddles_data = rows_to_dicts(ws.get_all_values()[2:], ws.get_all_values()[0])
+    grading_map = {
+        str(r.get("Case Number")): r.get("AI Grading Prompt") or generate_grading_logic(r.get("Question", ""), r.get("Answer", ""))
+        for r in riddles_data if r.get("Case Number")
+    }
+
+    for i in range(3, len(all_rows) + 1):
+        row = ws_sub.row_values(i)
+        while len(row) < len(headers):
+            row.append("")
+
+        if row[header_map["AI Grade"]].strip():
+            continue  # already graded
+
+        case = row[header_map["Case Number"]].strip()
+        user_answer = row[header_map["Answer"]].strip()
+
+        if not case or not user_answer or case not in grading_map:
+            continue
+
+        grading_prompt = grading_map[case]
+        grade, confidence = grade_submission_entry(grading_prompt, user_answer)
+
+        ws_sub.update_cell(i, header_map["AI Grade"] + 1, grade)
+        ws_sub.update_cell(i, header_map["AI Confidence"] + 1, confidence)
+        print(f"✅ Row {i} graded: {grade}, {confidence}")
 
 # Populate winners
 def populate_winners_tab():
@@ -237,6 +323,8 @@ def format_and_populate_all():
     total_rows = len(ws.get_all_values())
     for row in range(3, total_rows + 1):
         write_riddle_with_formatting(row)
+    grade_submissions_for_sheet("Submissions")
+    grade_submissions_for_sheet("Historical Submissions")
     populate_winners_tab()
 
 # Main entry point
