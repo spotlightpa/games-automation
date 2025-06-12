@@ -67,6 +67,9 @@ client = gspread.authorize(creds)
 sheet = client.open_by_key(SPREADSHEET_ID)
 ws = sheet.worksheet('Riddles')
 
+# Token tracking
+total_token_cost = 0.0
+
 # Rich-text formatting for riddles
 def write_riddle_with_formatting(row: int):
     cells = ws.row_values(row)
@@ -105,6 +108,7 @@ def write_riddle_with_formatting(row: int):
 
 # OpenAI API call to generate grading logic
 def generate_grading_logic(question: str, answer: str) -> str:
+    global total_token_cost
     prompt = f"""{GENERIC_GRADING_INSTRUCTIONS}
 
 Riddle Question: {question}
@@ -114,9 +118,23 @@ Provide grading logic:"""
     response = openai_client.chat.completions.create(
         model="gpt-4o",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
+        temperature=0,
         max_tokens=150
     )
+
+    usage = response.usage
+    input_tokens = usage.prompt_tokens
+    output_tokens = usage.completion_tokens
+    total_tokens = usage.total_tokens
+
+    input_cost = input_tokens * 0.005 / 1000
+    output_cost = output_tokens * 0.015 / 1000
+    total_cost = input_cost + output_cost
+    total_token_cost += total_cost
+
+    print(f"🔎 Tokens used — Prompt: {input_tokens}, Completion: {output_tokens}, Total: {total_tokens}")
+    print(f"💵 Estimated cost: ${total_cost:.6f}")
+
     return response.choices[0].message.content.strip()
 
 # Populate empty AI Grading Prompt cells
@@ -156,18 +174,18 @@ def is_marked_correct(entry):
 
 # OpenAI-based grading using per-riddle grading prompt
 def grade_submission_entry(grading_prompt, user_answer):
+    global total_token_cost
     prompt = f"""{grading_prompt.strip()}
 
-    You are grading a riddle submission. Use the information above to determine if the user's answer is correct. Then estimate how confident you are in your judgment — not based on surface similarity, but on how well the answer logically matches the riddle's requirements.
+You are grading a riddle submission. Use the information above to determine if the user's answer is correct. Then estimate how confident you are in your judgment — not based on surface similarity, but on how well the answer logically matches the riddle's requirements.
 
-    Use your full reasoning ability and the grading logic to determine confidence, just as a human editor would. Avoid mechanical scoring — your confidence should reflect your actual certainty in the answer being right or wrong.
+Use your full reasoning ability and the grading logic to determine confidence, just as a human editor would. Avoid mechanical scoring — your confidence should reflect your actual certainty in the answer being right or wrong.
 
-    Respond in this format exactly:
-    Correctness: Correct or Incorrect
-    Confidence: [number from 0 to 100]
+Respond in this format exactly:
+Correctness: Correct or Incorrect
+Confidence: [number from 0 to 100]
 
-    User's Answer: {user_answer}
-    """
+User's Answer: {user_answer}"""
 
     response = openai_client.chat.completions.create(
         model="gpt-4o",
@@ -175,6 +193,19 @@ def grade_submission_entry(grading_prompt, user_answer):
         temperature=0,
         max_tokens=150
     )
+
+    usage = response.usage
+    input_tokens = usage.prompt_tokens
+    output_tokens = usage.completion_tokens
+    total_tokens = usage.total_tokens
+
+    input_cost = input_tokens * 0.005 / 1000
+    output_cost = output_tokens * 0.015 / 1000
+    total_cost = input_cost + output_cost
+    total_token_cost += total_cost
+
+    print(f"🔎 Tokens used — Prompt: {input_tokens}, Completion: {output_tokens}, Total: {total_tokens}")
+    print(f"💵 Estimated cost: ${total_cost:.6f}")
 
     content = response.choices[0].message.content.strip()
 
@@ -326,6 +357,7 @@ def format_and_populate_all():
     grade_submissions_for_sheet("Submissions")
     grade_submissions_for_sheet("Historical Submissions")
     populate_winners_tab()
+    print(f"💰 Total estimated OpenAI token cost: ${total_token_cost:.6f}")
 
 # Main entry point
 if __name__ == '__main__':
