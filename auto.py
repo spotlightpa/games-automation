@@ -10,31 +10,35 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 
 # OAuth scopes for Sheets and Gmail
 SCOPES = [
-    'https://www.googleapis.com/auth/spreadsheets',
-    'https://www.googleapis.com/auth/gmail.readonly'
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/gmail.readonly",
 ]
 
 # Directory paths
 BASE_DIR = os.path.dirname(__file__)
-CONFIG_PATH = os.path.join(BASE_DIR, 'config', 'sheet_ids.yaml')
-TOKEN_PATH = os.path.join(BASE_DIR, 'config', 'token.json')
-CREDS_PATH = os.path.join(BASE_DIR, 'config', 'credentials-oauth.json')
+CONFIG_PATH = os.path.join(BASE_DIR, "config", "sheet_ids.yaml")
+TOKEN_PATH = os.path.join(BASE_DIR, "config", "token.json")
+CREDS_PATH = os.path.join(BASE_DIR, "config", "credentials-oauth.json")
 
 # Load spreadsheet ID
 with open(CONFIG_PATH) as f:
     CONFIG = yaml.safe_load(f)
-SPREADSHEET_ID = CONFIG['games_admin']
+SPREADSHEET_ID = CONFIG["games_admin"]
+
 
 # OpenAI API key retrieval
 def get_openai_key():
     key = os.getenv("OPENAI_API_KEY")
     if key:
         return key
-    key_path = os.path.join(BASE_DIR, 'config', 'openai_key.txt')
+    key_path = os.path.join(BASE_DIR, "config", "openai_key.txt")
     if os.path.exists(key_path):
-        with open(key_path, 'r') as f:
+        with open(key_path, "r") as f:
             return f.read().strip()
-    raise ValueError("OpenAI API key not found. Set OPENAI_API_KEY env variable or add to config/openai_key.txt")
+    raise ValueError(
+        "OpenAI API key not found. Set OPENAI_API_KEY env variable or add to config/openai_key.txt"
+    )
+
 
 openai_client = OpenAI(api_key=get_openai_key())
 
@@ -45,6 +49,7 @@ Do not restate these general rules. Assume trivial differences like punctuation,
 Be specific about variations or synonyms that should be accepted or rejected. Provide guidance in 1-3 sentences.
 """
 
+
 # Google OAuth credential management
 def get_credentials():
     creds = None
@@ -52,23 +57,25 @@ def get_credentials():
         creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
         if creds.expired and creds.refresh_token:
             creds.refresh(Request())
-            with open(TOKEN_PATH, 'w') as token_file:
+            with open(TOKEN_PATH, "w") as token_file:
                 token_file.write(creds.to_json())
     if not creds or not creds.valid:
         flow = InstalledAppFlow.from_client_secrets_file(CREDS_PATH, SCOPES)
         creds = flow.run_local_server(port=0)
-        with open(TOKEN_PATH, 'w') as token_file:
+        with open(TOKEN_PATH, "w") as token_file:
             token_file.write(creds.to_json())
     return creds
+
 
 # Initialize Google Sheets client
 creds = get_credentials()
 client = gspread.authorize(creds)
 sheet = client.open_by_key(SPREADSHEET_ID)
-ws = sheet.worksheet('Riddles')
+ws = sheet.worksheet("Riddles")
 
 # Token tracking
 total_token_cost = 0.0
+
 
 # Rich-text formatting for riddles
 def write_riddle_with_formatting(row: int):
@@ -82,29 +89,42 @@ def write_riddle_with_formatting(row: int):
     full_text = f"{teaser_upper} {case_text} {question}"
     start_case = len(teaser_upper) + 1
     end_case = start_case + len(case_text)
-    requests = [{
-        'updateCells': {
-            'range': {
-                'sheetId': ws._properties['sheetId'],
-                'startRowIndex': row - 1,
-                'endRowIndex': row,
-                'startColumnIndex': 4,
-                'endColumnIndex': 5
-            },
-            'rows': [{
-                'values': [{
-                    'userEnteredValue': {'stringValue': full_text},
-                    'textFormatRuns': [
-                        {'startIndex': start_case, 'format': {'bold': True, 'italic': True}},
-                        {'startIndex': end_case, 'format': {'bold': False, 'italic': False}}
-                    ]
-                }]
-            }],
-            'fields': 'userEnteredValue,textFormatRuns'
+    requests = [
+        {
+            "updateCells": {
+                "range": {
+                    "sheetId": ws._properties["sheetId"],
+                    "startRowIndex": row - 1,
+                    "endRowIndex": row,
+                    "startColumnIndex": 4,
+                    "endColumnIndex": 5,
+                },
+                "rows": [
+                    {
+                        "values": [
+                            {
+                                "userEnteredValue": {"stringValue": full_text},
+                                "textFormatRuns": [
+                                    {
+                                        "startIndex": start_case,
+                                        "format": {"bold": True, "italic": True},
+                                    },
+                                    {
+                                        "startIndex": end_case,
+                                        "format": {"bold": False, "italic": False},
+                                    },
+                                ],
+                            }
+                        ]
+                    }
+                ],
+                "fields": "userEnteredValue,textFormatRuns",
+            }
         }
-    }]
-    sheet.batch_update({'requests': requests})
+    ]
+    sheet.batch_update({"requests": requests})
     print(f"Formatted row {row} successfully.")
+
 
 # OpenAI API call to generate grading logic
 def generate_grading_logic(question: str, answer: str) -> str:
@@ -119,7 +139,7 @@ Provide grading logic:"""
         model="gpt-4o",
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
-        max_tokens=150
+        max_tokens=150,
     )
 
     usage = response.usage
@@ -132,10 +152,13 @@ Provide grading logic:"""
     total_cost = input_cost + output_cost
     total_token_cost += total_cost
 
-    print(f"🔎 Tokens used — Prompt: {input_tokens}, Completion: {output_tokens}, Total: {total_tokens}")
+    print(
+        f"🔎 Tokens used — Prompt: {input_tokens}, Completion: {output_tokens}, Total: {total_tokens}"
+    )
     print(f"💵 Estimated cost: ${total_cost:.6f}")
 
     return response.choices[0].message.content.strip()
+
 
 # Populate empty AI Grading Prompt cells
 def populate_ai_grading_prompts():
@@ -162,15 +185,20 @@ def populate_ai_grading_prompts():
         ws.update_cell(row_number, 6, f"AI: {grading_logic}")
         print(f"Updated grading logic for row {row_number}.")
 
+
 # Helpers
 def rows_to_dicts(data_rows, header):
-    return [dict(zip(header, row)) for row in data_rows if any(cell.strip() for cell in row)]
+    return [
+        dict(zip(header, row)) for row in data_rows if any(cell.strip() for cell in row)
+    ]
+
 
 # Determines if a submission is marked correct (considering override first)
 def is_marked_correct(entry):
-    override = entry.get('Override', '').strip().lower() if 'Override' in entry else ""
-    grade = entry.get('AI Grade', '').strip().lower() if 'AI Grade' in entry else ""
-    return override == 'correct' or (not override and grade == 'correct')
+    override = entry.get("Override", "").strip().lower() if "Override" in entry else ""
+    grade = entry.get("AI Grade", "").strip().lower() if "AI Grade" in entry else ""
+    return override == "correct" or (not override and grade == "correct")
+
 
 # OpenAI-based grading using per-riddle grading prompt
 def grade_submission_entry(grading_prompt, user_answer):
@@ -191,7 +219,7 @@ User's Answer: {user_answer}"""
         model="gpt-4o",
         messages=[{"role": "user", "content": prompt}],
         temperature=0,
-        max_tokens=150
+        max_tokens=150,
     )
 
     usage = response.usage
@@ -204,12 +232,16 @@ User's Answer: {user_answer}"""
     total_cost = input_cost + output_cost
     total_token_cost += total_cost
 
-    print(f"🔎 Tokens used — Prompt: {input_tokens}, Completion: {output_tokens}, Total: {total_tokens}")
+    print(
+        f"🔎 Tokens used — Prompt: {input_tokens}, Completion: {output_tokens}, Total: {total_tokens}"
+    )
     print(f"💵 Estimated cost: ${total_cost:.6f}")
 
     content = response.choices[0].message.content.strip()
 
-    match_grade = re.search(r"Correctness:\s*(Correct|Incorrect)", content, re.IGNORECASE)
+    match_grade = re.search(
+        r"Correctness:\s*(Correct|Incorrect)", content, re.IGNORECASE
+    )
     match_conf = re.search(r"Confidence:\s*(\d+)", content)
 
     if not match_grade or not match_conf:
@@ -220,6 +252,7 @@ User's Answer: {user_answer}"""
     confidence = f"{match_conf.group(1)}%"
 
     return grade, confidence
+
 
 # Grade only blank submissions in a sheet
 def grade_submissions_for_sheet(sheet_name):
@@ -243,8 +276,10 @@ def grade_submissions_for_sheet(sheet_name):
 
     riddles_data = rows_to_dicts(ws.get_all_values()[2:], ws.get_all_values()[0])
     grading_map = {
-        str(r.get("Case Number")): r.get("AI Grading Prompt") or generate_grading_logic(r.get("Question", ""), r.get("Answer", ""))
-        for r in riddles_data if r.get("Case Number")
+        str(r.get("Case Number")): r.get("AI Grading Prompt")
+        or generate_grading_logic(r.get("Question", ""), r.get("Answer", ""))
+        for r in riddles_data
+        if r.get("Case Number")
     }
 
     for i in range(3, len(all_rows) + 1):
@@ -268,12 +303,13 @@ def grade_submissions_for_sheet(sheet_name):
         ws_sub.update_cell(i, header_map["AI Confidence"] + 1, confidence)
         print(f"✅ Row {i} graded: {grade}, {confidence}")
 
+
 # Populate winners
 def populate_winners_tab():
-    riddles_ws = sheet.worksheet('Riddles')
-    submissions_ws = sheet.worksheet('Submissions')
-    historical_ws = sheet.worksheet('Historical Submissions')
-    winners_ws = sheet.worksheet('Winners')
+    riddles_ws = sheet.worksheet("Riddles")
+    submissions_ws = sheet.worksheet("Submissions")
+    historical_ws = sheet.worksheet("Historical Submissions")
+    winners_ws = sheet.worksheet("Winners")
 
     # Load Riddles
     riddles_raw = riddles_ws.get_all_values()
@@ -294,7 +330,7 @@ def populate_winners_tab():
     all_rows = []
 
     for riddle in riddles_data:
-        case_number = riddle.get('Case Number')
+        case_number = riddle.get("Case Number")
         if not case_number or not str(case_number).isdigit():
             continue
         case_number = int(case_number)
@@ -302,25 +338,32 @@ def populate_winners_tab():
 
         # Previous clue/answer
         prev_riddle = next(
-            (r for r in riddles_data if str(r.get('Case Number')) == str(prev_case_number)),
-            None
+            (
+                r
+                for r in riddles_data
+                if str(r.get("Case Number")) == str(prev_case_number)
+            ),
+            None,
         )
         prev_clue = prev_riddle.get("Question", "").strip() if prev_riddle else ""
         prev_answer = prev_riddle.get("Answer", "").strip() if prev_riddle else ""
 
         # Correct entries
         correct_entries = [
-            e for e in all_submissions
+            e
+            for e in all_submissions
             if str(e.get("Case Number")).isdigit()
             and int(e["Case Number"]) == case_number
             and is_marked_correct(e)
         ]
 
-        winner_names = sorted({
-            f"{e['First Name']} {e['Last Name Initial']}."
-            for e in correct_entries
-            if e.get('First Name') and e.get('Last Name Initial')
-        })
+        winner_names = sorted(
+            {
+                f"{e['First Name']} {e['Last Name Initial']}."
+                for e in correct_entries
+                if e.get("First Name") and e.get("Last Name Initial")
+            }
+        )
 
         winners_str = ", ".join(winner_names)
         full_text = ""
@@ -336,14 +379,16 @@ def populate_winners_tab():
             winners_str,
             prev_clue,
             prev_answer,
-            full_text
+            full_text,
         ]
 
         all_rows.append(row)
 
     # ✅ Write to row 3 and down only
     if all_rows:
-        winners_ws.update(all_rows, f"A3:F{2 + len(all_rows)}", value_input_option="USER_ENTERED")
+        winners_ws.update(
+            all_rows, f"A3:F{2 + len(all_rows)}", value_input_option="USER_ENTERED"
+        )
 
     print(f"✅ Populated {len(all_rows)} winner rows.")
 
@@ -359,8 +404,9 @@ def format_and_populate_all():
     populate_winners_tab()
     print(f"💰 Total estimated OpenAI token cost: ${total_token_cost:.6f}")
 
+
 # Main entry point
-if __name__ == '__main__':
+if __name__ == "__main__":
     print("Starting full automation: formatting, grading, and winner population...")
     format_and_populate_all()
     print("Automation completed successfully.")
