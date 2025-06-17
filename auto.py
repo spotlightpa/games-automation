@@ -94,7 +94,7 @@ def get_credentials():
 creds = get_credentials()
 client = gspread.authorize(creds)
 sheet = client.open_by_key(SPREADSHEET_ID)
-ws = sheet.worksheet("Riddles")
+ws = sheet.worksheet("Games")
 
 # Token tracking
 total_token_cost = 0.0
@@ -148,6 +148,37 @@ def write_riddle_with_formatting(row: int):
     sheet.batch_update({"requests": requests})
     log(f"Formatted row {row} successfully.")
 
+# Backfill Game column using Case Number
+def backfill_game_column(target_ws_name):
+    log(f"Backfilling Game column in sheet: {target_ws_name}")
+    target_ws = sheet.worksheet(target_ws_name)
+
+    riddles_data = ws.get_all_records()
+    game_map = {
+        str(r.get("Case Number")): r.get("Game", "") for r in riddles_data if r.get("Case Number")
+    }
+
+    rows = target_ws.get_all_values()
+    headers = rows[0]
+    header_map = {h.strip(): i for i, h in enumerate(headers)}
+
+    if "Game" not in header_map:
+        headers.insert(1, "Game")
+        target_ws.update("A1", [headers])
+        header_map = {h.strip(): i for i, h in enumerate(headers)}
+
+    game_col_index = header_map["Game"] + 1
+
+    for i in range(2, len(rows)):
+        row = rows[i]
+        while len(row) < len(headers):
+            row.append("")
+        case = row[header_map["Case Number"]].strip()
+        if case and not row[header_map["Game"]].strip():
+            game = game_map.get(case, "")
+            if game:
+                target_ws.update_cell(i + 1, game_col_index, game)
+                log(f"Filled Game for row {i+1}: {game}")
 
 # OpenAI API call to generate grading logic
 def generate_grading_logic(question: str, answer: str) -> str:
@@ -329,7 +360,7 @@ def grade_submissions_for_sheet(sheet_name):
 
 # Populate winners
 def populate_winners_tab():
-    riddles_ws = sheet.worksheet("Riddles")
+    riddles_ws = sheet.worksheet("Games")
     submissions_ws = sheet.worksheet("Submissions")
     historical_ws = sheet.worksheet("Historical Submissions")
     winners_ws = sheet.worksheet("Winners")
@@ -418,6 +449,9 @@ def populate_winners_tab():
 
 # Run all steps
 def format_and_populate_all():
+    backfill_game_column("Submissions")
+    backfill_game_column("Historical Submissions")
+    backfill_game_column("Winners")
     populate_ai_grading_prompts()
     total_rows = len(ws.get_all_values())
     for row in range(3, total_rows + 1):
