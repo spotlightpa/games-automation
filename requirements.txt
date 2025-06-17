@@ -3,3 +3,4 @@ PyYAML
 google-auth
 google-auth-oauthlib
 openai
+dotenv

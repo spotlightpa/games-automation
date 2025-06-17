@@ -2,11 +2,34 @@ import os
 import yaml
 import gspread
 import re
+import requests
 
 from openai import OpenAI
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
+SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
+
+def slack_log(message: str):
+    try:
+        requests.post(
+            SLACK_WEBHOOK_URL,
+            json={"text": message},
+            timeout=5
+        )
+    except Exception as e:
+        print(f"Slack logging failed: {e}")
+
+def log(message: str):
+    print(message)
+    slack_log(message)
+
+
 
 # OAuth scopes for Sheets and Gmail
 SCOPES = [
@@ -81,7 +104,7 @@ total_token_cost = 0.0
 def write_riddle_with_formatting(row: int):
     cells = ws.row_values(row)
     if len(cells) < 4 or not all(cells[:4]):
-        print(f"Skipping row {row}, incomplete data.")
+        log(f"Skipping row {row}, incomplete data.")
         return
     case_no, teaser, question, _ = cells[:4]
     teaser_upper = teaser.upper().strip()
@@ -123,7 +146,7 @@ def write_riddle_with_formatting(row: int):
         }
     ]
     sheet.batch_update({"requests": requests})
-    print(f"Formatted row {row} successfully.")
+    log(f"Formatted row {row} successfully.")
 
 
 # OpenAI API call to generate grading logic
@@ -152,10 +175,10 @@ Provide grading logic:"""
     total_cost = input_cost + output_cost
     total_token_cost += total_cost
 
-    print(
+    log(
         f"🔎 Tokens used — Prompt: {input_tokens}, Completion: {output_tokens}, Total: {total_tokens}"
     )
-    print(f"💵 Estimated cost: ${total_cost:.6f}")
+    log(f"💵 Estimated cost: ${total_cost:.6f}")
 
     return response.choices[0].message.content.strip()
 
@@ -172,18 +195,18 @@ def populate_ai_grading_prompts():
         grading_prompt = row[5] if len(row) > 5 else ""
 
         if not question or not answer:
-            print(f"Skipping row {row_number}, incomplete question or answer.")
+            log(f"Skipping row {row_number}, incomplete question or answer.")
             continue
 
         if grading_prompt.strip():
-            print(f"Row {row_number} already has grading prompt, skipping.")
+            log(f"Row {row_number} already has grading prompt, skipping.")
             continue
 
-        print(f"Generating grading logic for row {row_number}...")
+        log(f"Generating grading logic for row {row_number}...")
         grading_logic = generate_grading_logic(question, answer)
 
         ws.update_cell(row_number, 6, f"AI: {grading_logic}")
-        print(f"Updated grading logic for row {row_number}.")
+        log(f"Updated grading logic for row {row_number}.")
 
 
 # Helpers
@@ -232,10 +255,10 @@ User's Answer: {user_answer}"""
     total_cost = input_cost + output_cost
     total_token_cost += total_cost
 
-    print(
+    log(
         f"🔎 Tokens used — Prompt: {input_tokens}, Completion: {output_tokens}, Total: {total_tokens}"
     )
-    print(f"💵 Estimated cost: ${total_cost:.6f}")
+    log(f"💵 Estimated cost: ${total_cost:.6f}")
 
     content = response.choices[0].message.content.strip()
 
@@ -245,7 +268,7 @@ User's Answer: {user_answer}"""
     match_conf = re.search(r"Confidence:\s*(\d+)", content)
 
     if not match_grade or not match_conf:
-        print(f"⚠️ AI response could not be parsed:\n{content}")
+        log(f"⚠️ AI response could not be parsed:\n{content}")
         return "Uncertain", "N/A"
 
     grade = match_grade.group(1).capitalize()
@@ -256,7 +279,7 @@ User's Answer: {user_answer}"""
 
 # Grade only blank submissions in a sheet
 def grade_submissions_for_sheet(sheet_name):
-    print(f"Grading submissions in sheet: {sheet_name}")
+    log(f"Grading submissions in sheet: {sheet_name}")
     ws_sub = sheet.worksheet(sheet_name)
 
     all_rows = ws_sub.get_all_values()
@@ -301,7 +324,7 @@ def grade_submissions_for_sheet(sheet_name):
 
         ws_sub.update_cell(i, header_map["AI Grade"] + 1, grade)
         ws_sub.update_cell(i, header_map["AI Confidence"] + 1, confidence)
-        print(f"✅ Row {i} graded: {grade}, {confidence}")
+        log(f"✅ Row {i} graded: {grade}, {confidence}")
 
 
 # Populate winners
@@ -390,7 +413,7 @@ def populate_winners_tab():
             all_rows, f"A3:F{2 + len(all_rows)}", value_input_option="USER_ENTERED"
         )
 
-    print(f"✅ Populated {len(all_rows)} winner rows.")
+    log(f"✅ Populated {len(all_rows)} winner rows.")
 
 
 # Run all steps
@@ -402,11 +425,12 @@ def format_and_populate_all():
     grade_submissions_for_sheet("Submissions")
     grade_submissions_for_sheet("Historical Submissions")
     populate_winners_tab()
-    print(f"💰 Total estimated OpenAI token cost: ${total_token_cost:.6f}")
+    log(f"💰 Total estimated OpenAI token cost: ${total_token_cost:.6f}")
 
 
 # Main entry point
 if __name__ == "__main__":
-    print("Starting full automation: formatting, grading, and winner population...")
+    log("🚀 Starting full automation: formatting, grading, and winner population...")
     format_and_populate_all()
-    print("Automation completed successfully.")
+    log("✅ Automation completed successfully.")
+
