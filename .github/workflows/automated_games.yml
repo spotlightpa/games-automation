@@ -1,0 +1,40 @@
+name: Automated Games
+
+on:
+  schedule:
+    - cron: '0 18 * * *'    # Daily at 2 p.m. EST
+  workflow_dispatch:
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Restore OAuth token
+        run: |
+          mkdir -p config
+          echo "${{ secrets.TOKEN_JSON }}" > config/token.json
+        shell: bash
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          python3 -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Botlight PA
+        run: |
+          source .venv/bin/activate
+          python3 bot.py all
+        env:
+          GMAIL_LABEL: "Riddles"
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

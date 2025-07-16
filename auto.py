@@ -102,16 +102,38 @@ total_token_cost = 0.0
 
 # Rich-text formatting for riddles
 def write_riddle_with_formatting(row: int):
-    cells = ws.row_values(row)
-    if len(cells) < 4 or not all(cells[:4]):
-        log(f"Skipping row {row}, incomplete data.")
+    headers = ws.row_values(1)
+    header_map = {h.strip(): i for i, h in enumerate(headers)}
+
+    required_cols = ["Case Number", "Teaser", "Question", "Newsletter Text"]
+    if not all(col in header_map for col in required_cols):
+        log("Missing one or more required columns for formatting.")
         return
-    case_no, teaser, question, _ = cells[:4]
-    teaser_upper = teaser.upper().strip()
+
+    row_values = ws.row_values(row)
+    while len(row_values) < len(headers):
+        row_values.append("")
+
+    case_no = row_values[header_map["Case Number"]].strip()
+    teaser = row_values[header_map["Teaser"]].strip()
+    question = row_values[header_map["Question"]].strip()
+
+    if not case_no or not question:
+        log(f"Skipping row {row}, missing Case Number or Question.")
+        return
+
+    teaser_upper = teaser.upper()
     case_text = f"(Case No. {case_no}):"
     full_text = f"{teaser_upper} {case_text} {question}"
+
+    # Prepare formatting indices
     start_case = len(teaser_upper) + 1
     end_case = start_case + len(case_text)
+
+    # Get correct column index for Newsletter Text
+    col_index = header_map["Newsletter Text"]
+
+    # Build the batchUpdate request
     requests = [
         {
             "updateCells": {
@@ -119,8 +141,8 @@ def write_riddle_with_formatting(row: int):
                     "sheetId": ws._properties["sheetId"],
                     "startRowIndex": row - 1,
                     "endRowIndex": row,
-                    "startColumnIndex": 4,
-                    "endColumnIndex": 5,
+                    "startColumnIndex": col_index,
+                    "endColumnIndex": col_index + 1,
                 },
                 "rows": [
                     {
@@ -145,8 +167,10 @@ def write_riddle_with_formatting(row: int):
             }
         }
     ]
+
     sheet.batch_update({"requests": requests})
     log(f"Formatted row {row} successfully.")
+
 
 # Backfill Game column using Case Number
 def backfill_game_column(target_ws_name):
@@ -357,7 +381,6 @@ def grade_submissions_for_sheet(sheet_name):
         ws_sub.update_cell(i, header_map["AI Confidence"] + 1, confidence)
         log(f"✅ Row {i} graded: {grade}, {confidence}")
 
-
 # Populate winners
 def populate_winners_tab():
     riddles_ws = sheet.worksheet("Games")
@@ -370,6 +393,11 @@ def populate_winners_tab():
     riddles_header = riddles_raw[0]
     riddles_data = rows_to_dicts(riddles_raw[2:], riddles_header)
 
+    # Build a map of Case Number to riddle row
+    riddles_by_case = {
+        str(row.get("Case Number")): row for row in riddles_data if row.get("Case Number")
+    }
+
     # Load Submissions
     sub_header = submissions_ws.get_all_values()[0]
     submissions_data = rows_to_dicts(submissions_ws.get_all_values()[2:], sub_header)
@@ -377,49 +405,44 @@ def populate_winners_tab():
     all_submissions = submissions_data + historical_data
 
     # Clear data in rows 3 and below
+    winner_headers = winners_ws.row_values(1)
+    num_columns = len(winner_headers)
     last_row = len(winners_ws.get_all_values())
     if last_row >= 3:
-        winners_ws.update([[""] * 6] * (last_row - 2), f"A3:F{last_row}")
+        winners_ws.update(
+            f"A3:{chr(64 + num_columns)}{last_row}", [["" for _ in range(num_columns)] for _ in range(last_row - 2)]
+        )
 
     all_rows = []
 
-    for riddle in riddles_data:
-        case_number = riddle.get("Case Number")
-        if not case_number or not str(case_number).isdigit():
+    for case_str, riddle in riddles_by_case.items():
+        if not case_str.isdigit():
             continue
-        case_number = int(case_number)
-        prev_case_number = case_number - 1
 
-        # Previous clue/answer
-        prev_riddle = next(
-            (
-                r
-                for r in riddles_data
-                if str(r.get("Case Number")) == str(prev_case_number)
-            ),
-            None,
-        )
+        case_number = int(case_str)
+        game = riddle.get("Game", "")
+        prev_case_str = str(case_number - 1)
+
+        prev_riddle = riddles_by_case.get(prev_case_str)
         prev_clue = prev_riddle.get("Question", "").strip() if prev_riddle else ""
         prev_answer = prev_riddle.get("Answer", "").strip() if prev_riddle else ""
 
-        # Correct entries
         correct_entries = [
-            e
-            for e in all_submissions
-            if str(e.get("Case Number")).isdigit()
-            and int(e["Case Number"]) == case_number
-            and is_marked_correct(e)
+            e for e in all_submissions
+            if str(e.get("Case Number")) == case_str and is_marked_correct(e)
         ]
 
         winner_names = sorted(
             {
-                f"{e['First Name']} {e['Last Name Initial']}."
+                f"{e['First Name']} {e['Last Name Initial']}.": e.get("Email", "")
                 for e in correct_entries
                 if e.get("First Name") and e.get("Last Name Initial")
-            }
+            }.items()
         )
 
-        winners_str = ", ".join(winner_names)
+        winners_str = ", ".join(name for name, _ in winner_names)
+        emails_str = ", ".join(email for _, email in winner_names)
+
         full_text = ""
         if winner_names:
             full_text = (
@@ -429,8 +452,11 @@ def populate_winners_tab():
 
         row = [
             case_number,
+            game,
             "",  # Swag Winner TK
+            "",  # Swag Winner Email
             winners_str,
+            emails_str,
             prev_clue,
             prev_answer,
             full_text,
@@ -441,11 +467,10 @@ def populate_winners_tab():
     # ✅ Write to row 3 and down only
     if all_rows:
         winners_ws.update(
-            all_rows, f"A3:F{2 + len(all_rows)}", value_input_option="USER_ENTERED"
+            f"A3:I{2 + len(all_rows)}", all_rows, value_input_option="USER_ENTERED"
         )
 
     log(f"✅ Populated {len(all_rows)} winner rows.")
-
 
 # Run all steps
 def format_and_populate_all():
