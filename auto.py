@@ -9,6 +9,7 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from google_auth_oauthlib.flow import InstalledAppFlow
 from dotenv import load_dotenv
+from googleapiclient.discovery import build
 
 
 load_dotenv()
@@ -98,6 +99,102 @@ ws = sheet.worksheet("Games")
 
 # Token tracking
 total_token_cost = 0.0
+
+def list_labels():
+    creds = get_credentials()
+    service = build("gmail", "v1", credentials=creds)
+
+    results = service.users().labels().list(userId="me").execute()
+    labels = results.get("labels", [])
+    for label in labels:
+        log(f"Label name: {label['name']} — ID: {label['id']}")
+def fetch_riddler_emails(max_results=10):
+    creds = get_credentials()
+    service = build("gmail", "v1", credentials=creds)
+    ws_sub = sheet.worksheet("Submissions")
+
+    try:
+        RIDDLE_LABEL_ID = "Label_1294511421370059161"
+
+        results = service.users().messages().list(
+            userId="me",
+            labelIds=[RIDDLE_LABEL_ID],
+            maxResults=max_results,
+        ).execute()
+
+        messages = results.get("messages", [])
+        if not messages:
+            log("📭 No messages found in 'Riddler' label.")
+            return
+
+        headers = ws_sub.row_values(1)
+        game_name = ws.row_values(3)[1]
+
+        # Load existing submission keys for deduplication
+        existing_rows = ws_sub.get_all_records()
+        existing_keys = set(
+            (row.get("Email", "").strip().lower(), row.get("Answer", "").strip())
+            for row in existing_rows if row.get("Email") and row.get("Answer")
+        )
+
+        for msg in messages:
+            msg_id = msg["id"]
+            message = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
+
+            payload = message["payload"]
+            headers_data = payload.get("headers", [])
+            subject = next((h["value"] for h in headers_data if h["name"] == "Subject"), "(No Subject)")
+            from_email = next((h["value"] for h in headers_data if h["name"] == "From"), "(No From)")
+            date = next((h["value"] for h in headers_data if h["name"] == "Date"), "")
+            timestamp = date
+
+            name_match = re.match(r"(.*?)(<|via)", from_email)
+            name = name_match.group(1).strip().strip("'\"") if name_match else from_email
+            name_parts = name.split()
+            first_name = name_parts[0] if name_parts else ""
+            last_initial = name_parts[1][0] if len(name_parts) > 1 else ""
+
+            parts = payload.get("parts", [])
+            body_data = ""
+            for part in parts:
+                if part["mimeType"] == "text/plain":
+                    body_data = part["body"].get("data", "")
+                    break
+
+            if not body_data:
+                body_data = payload.get("body", {}).get("data", "")
+
+            if body_data:
+                import base64
+                body_text = base64.urlsafe_b64decode(body_data).decode("utf-8").strip()
+            else:
+                body_text = "(No body found)"
+
+            key = (from_email.strip().lower(), body_text)
+            if key in existing_keys:
+                log(f"⚠️ Skipping duplicate submission from {from_email}")
+                continue
+
+            log(f"📧 Parsed answer: {body_text[:50]}...")
+
+            new_row = [
+                "",                    # Case Number (skipped for now)
+                game_name,             # Game
+                timestamp,             # Timestamp
+                first_name,            # First Name
+                last_initial,          # Last Initial
+                from_email,            # Email
+                body_text,             # Answer
+                "",                    # AI Grade
+                "",                    # AI Confidence
+                ""                     # Override
+            ]
+
+            ws_sub.append_row(new_row, value_input_option="USER_ENTERED")
+            log(f"✅ Added submission from {from_email}")
+
+    except Exception as e:
+        log(f"⚠️ Error fetching riddler emails: {e}")
 
 
 # Rich-text formatting for riddles
@@ -385,7 +482,6 @@ def grade_submissions_for_sheet(sheet_name):
 def populate_winners_tab():
     riddles_ws = sheet.worksheet("Games")
     submissions_ws = sheet.worksheet("Submissions")
-    historical_ws = sheet.worksheet("Historical Submissions")
     winners_ws = sheet.worksheet("Winners")
 
     # Load Riddles
@@ -401,8 +497,7 @@ def populate_winners_tab():
     # Load Submissions
     sub_header = submissions_ws.get_all_values()[0]
     submissions_data = rows_to_dicts(submissions_ws.get_all_values()[2:], sub_header)
-    historical_data = rows_to_dicts(historical_ws.get_all_values()[2:], sub_header)
-    all_submissions = submissions_data + historical_data
+    all_submissions = submissions_data
 
     # Clear data in rows 3 and below
     winner_headers = winners_ws.row_values(1)
@@ -475,14 +570,12 @@ def populate_winners_tab():
 # Run all steps
 def format_and_populate_all():
     backfill_game_column("Submissions")
-    backfill_game_column("Historical Submissions")
     backfill_game_column("Winners")
     populate_ai_grading_prompts()
     total_rows = len(ws.get_all_values())
     for row in range(3, total_rows + 1):
         write_riddle_with_formatting(row)
     grade_submissions_for_sheet("Submissions")
-    grade_submissions_for_sheet("Historical Submissions")
     populate_winners_tab()
     log(f"💰 Total estimated OpenAI token cost: ${total_token_cost:.6f}")
 
@@ -493,3 +586,5 @@ if __name__ == "__main__":
     format_and_populate_all()
     log("✅ Automation completed successfully.")
 
+    list_labels()  # Run this once to get label ID
+    fetch_riddler_emails()  # Replace label ID and then run
