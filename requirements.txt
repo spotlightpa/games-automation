@@ -2,5 +2,7 @@ gspread
 PyYAML
 google-auth
 google-auth-oauthlib
+google-api-python-client
 openai
-dotenv
+python-dotenv
+requests
