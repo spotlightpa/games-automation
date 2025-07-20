@@ -1,5 +1,9 @@
 import os
 import yaml
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Scopes required for Google Sheets and Gmail API access
 SCOPES = [
@@ -28,3 +32,7 @@ if "games_admin" not in CONFIG:
     raise KeyError("Missing 'games_admin' key in sheet_ids.yaml")
 
 SPREADSHEET_ID = CONFIG["games_admin"]
+
+# Make the label ID accessible everywhere
+RIDDLE_LABEL_ID = os.getenv("RIDDLE_LABEL_ID")
+SCRAMBLER_LABEL_ID = os.getenv("SCRAMBLER_LABEL_ID")
