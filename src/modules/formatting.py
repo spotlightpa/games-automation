@@ -14,7 +14,7 @@ def reformat_column_with_function(ws, header_name, normalize_fn):
     col_idx = headers.index(header_name) + 1  # Sheets API is 1-based
     updated_count = 0
 
-    for i in range(1, len(rows)):
+    for i in range(2, len(rows)): 
         row = rows[i]
         if len(row) < col_idx:
             continue
@@ -43,7 +43,7 @@ def reformat_first_names(sheet):
     col_idx = headers.index("First Name") + 1
     updated_count = 0
 
-    for i in range(1, len(rows)):
+    for i in range(2, len(rows)):
         row = rows[i]
         if len(row) < col_idx:
             continue
