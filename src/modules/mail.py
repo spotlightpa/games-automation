@@ -5,12 +5,9 @@ from googleapiclient.discovery import build
 from modules.auth import get_credentials, get_gspread_client
 from modules.logging_utils import log
 from modules import config
+from helpers.sheets_client import get_sheet_and_ws
 
-
-# Initialize Sheets client and worksheet references
-client = get_gspread_client()
-sheet = client.open_by_key(config.SPREADSHEET_ID)
-ws = sheet.worksheet("Games")
+client, sheet, ws = get_sheet_and_ws()
 
 def list_labels():
     
