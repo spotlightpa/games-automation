@@ -2,6 +2,7 @@ import re
 import base64
 
 from googleapiclient.discovery import build
+from modules.first_names import normalize_first_name
 from modules.auth import get_credentials, get_gspread_client
 from modules.logging_utils import log
 from modules import config
@@ -86,7 +87,9 @@ def fetch_riddler_emails(max_results=10):
             name_match = re.match(r"(.*?)(<|via)", from_email)
             name = name_match.group(1).strip().strip("'\"") if name_match else from_email
             name_parts = name.split()
-            first_name = name_parts[0] if name_parts else ""
+            first_name_raw = name_parts[0] if name_parts else ""
+            first_name = normalize_first_name(first_name_raw)
+            log(f"🧪 Normalized: '{first_name_raw}' → '{first_name}'")
             last_initial = name_parts[1][0] if len(name_parts) > 1 else ""
 
             # Look for text/plain body (most reliable), fallback to root body
