@@ -1,4 +1,37 @@
+from dateutil import parser
 from modules.logging_utils import log
+
+
+def reformat_submission_timestamps(sheet):
+    log("🕒 Starting timestamp formatting for Submissions tab...")
+
+    ws = sheet.worksheet("Submissions")
+    rows = ws.get_all_values()
+    headers = rows[0]
+    timestamp_col_idx = headers.index("Timestamp")
+
+    updated_rows = []
+    for i, row in enumerate(rows[1:], start=2):
+        if len(row) <= timestamp_col_idx:
+            continue
+
+        raw_ts = row[timestamp_col_idx].strip()
+        if not raw_ts:
+            continue
+
+        try:
+            # Try parsing and formatting
+            dt = parser.parse(raw_ts)
+            formatted_ts = dt.strftime("%m/%d/%Y %H:%M")
+
+            # Only update if different
+            if formatted_ts != raw_ts:
+                ws.update_cell(i, timestamp_col_idx + 1, formatted_ts)
+                log(f"✅ Row {i}: Fixed timestamp → {formatted_ts}")
+        except Exception as e:
+            log(f"⚠️ Row {i}: Could not parse timestamp '{raw_ts}': {e}")
+
+    log("🎉 Timestamp formatting complete.")
 
 # Rich-text formatting for riddles
 def write_riddle_with_formatting(sheet, ws, row: int):
