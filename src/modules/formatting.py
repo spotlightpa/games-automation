@@ -96,6 +96,113 @@ def reformat_submission_timestamps(sheet):
 
 # Rich-text formatting for riddles
 def write_riddle_with_formatting(sheet, ws, row: int):
+    headers = ws.row_values(1)
+    header_map = {h.strip(): i for i, h in enumerate(headers)}
+
+    required_cols = ["Case Number", "Game", "Teaser", "Question", "Newsletter Text"]
+    if not all(col in header_map for col in required_cols):
+        log("Missing one or more required columns for formatting.")
+        return
+
+    row_values = ws.row_values(row)
+    while len(row_values) < len(headers):
+        row_values.append("")
+
+    game = row_values[header_map["Game"]].strip()
+    case_no = row_values[header_map["Case Number"]].strip()
+    teaser = row_values[header_map["Teaser"]].strip()
+    question = row_values[header_map["Question"]].strip()
+    col_index = header_map["Newsletter Text"]
+
+    if not case_no or not question:
+        log(f"Skipping row {row}, missing Case Number or Question.")
+        return
+
+    if game.lower() == "scrambler":
+        # Format scramble: add spaces, uppercase
+        scrambled_text = " ".join(question.upper())
+        requests = [
+            {
+                "updateCells": {
+                    "range": {
+                        "sheetId": ws._properties["sheetId"],
+                        "startRowIndex": row - 1,
+                        "endRowIndex": row,
+                        "startColumnIndex": col_index,
+                        "endColumnIndex": col_index + 1,
+                    },
+                    "rows": [
+                        {
+                            "values": [
+                                {
+                                    "userEnteredValue": {"stringValue": scrambled_text},
+                                    "userEnteredFormat": {
+                                        "textFormat": {
+                                            "fontSize": 25,
+                                            "bold": True,
+                                            "foregroundColor": {
+                                                "red": 12 / 255,
+                                                "green": 115 / 255,
+                                                "blue": 163 / 255,
+                                            }
+                                        }
+                                    },
+                                }
+                            ]
+                        }
+                    ],
+                    "fields": "userEnteredValue,userEnteredFormat.textFormat",
+                }
+            }
+        ]
+        sheet.batch_update({"requests": requests})
+        log(f"🧩 Formatted Scrambler row {row} successfully.")
+        return
+
+    # Riddler format
+    teaser_upper = teaser.upper()
+    case_text = f"(Case No. {case_no}):"
+    full_text = f"{teaser_upper} {case_text} {question}"
+
+    start_case = len(teaser_upper) + 1
+    end_case = start_case + len(case_text)
+
+    requests = [
+        {
+            "updateCells": {
+                "range": {
+                    "sheetId": ws._properties["sheetId"],
+                    "startRowIndex": row - 1,
+                    "endRowIndex": row,
+                    "startColumnIndex": col_index,
+                    "endColumnIndex": col_index + 1,
+                },
+                "rows": [
+                    {
+                        "values": [
+                            {
+                                "userEnteredValue": {"stringValue": full_text},
+                                "textFormatRuns": [
+                                    {
+                                        "startIndex": start_case,
+                                        "format": {"bold": True, "italic": True},
+                                    },
+                                    {
+                                        "startIndex": end_case,
+                                        "format": {"bold": False, "italic": False},
+                                    },
+                                ],
+                            }
+                        ]
+                    }
+                ],
+                "fields": "userEnteredValue,textFormatRuns",
+            }
+        }
+    ]
+    sheet.batch_update({"requests": requests})
+    log(f"🧠 Formatted Riddler row {row} successfully.")
+
     # Get the header row to map column names to indexes
     headers = ws.row_values(1)
     header_map = {h.strip(): i for i, h in enumerate(headers)}
