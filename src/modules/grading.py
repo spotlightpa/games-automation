@@ -103,7 +103,15 @@ def populate_ai_grading_prompts():
         log(f"Generating grading logic for row {row_number}...")
         grading_logic = generate_grading_logic(question, answer)
 
-        ws.update_cell(row_number, 6, f"AI: {grading_logic}")
+        header_map = {h.strip(): i for i, h in enumerate(all_rows[0])}
+        grading_col = header_map.get("AI Grading Prompt")
+
+        if grading_col is None:
+            log("❌ 'AI Grading Prompt' column not found.")
+            return
+
+        ws.update_cell(row_number, grading_col + 1, f"AI: {grading_logic}")
+
         log(f"Updated grading logic for row {row_number}.")
 
 # Determines if a submission is marked correct, considering override first
