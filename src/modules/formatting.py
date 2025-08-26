@@ -3,6 +3,7 @@ from modules.first_names import normalize_first_name
 from modules.last_names import normalize_last_initial
 from modules.logging_utils import log
 
+
 def reformat_column_with_function(ws, header_name, normalize_fn):
     rows = ws.get_all_values()
     headers = rows[0]
@@ -14,7 +15,7 @@ def reformat_column_with_function(ws, header_name, normalize_fn):
     col_idx = headers.index(header_name) + 1  # Sheets API is 1-based
     updated_count = 0
 
-    for i in range(2, len(rows)): 
+    for i in range(2, len(rows)):
         row = rows[i]
         if len(row) < col_idx:
             continue
@@ -35,7 +36,7 @@ def reformat_first_names(sheet):
     ws = sheet.worksheet("Submissions")
     rows = ws.get_all_values()
     headers = rows[0]
-    
+
     if "First Name" not in headers:
         log("❌ 'First Name' column not found.")
         return
@@ -58,21 +59,34 @@ def reformat_first_names(sheet):
 
     log(f"🎉 First name cleanup complete. {updated_count} rows updated.")
 
+
 def reformat_last_initials(sheet):
     log("✏️ Starting Last Name Initial cleanup...")
     ws = sheet.worksheet("Submissions")
     reformat_column_with_function(ws, "Last Name Initial", normalize_last_initial)
 
+
 def reformat_submission_timestamps(sheet):
+    """
+    Normalize Submissions!Timestamp to 'MM/DD/YYYY HH:MM AM/PM'.
+
+    - Skips row 2 (the template/instructions row).
+    - Skips any cells that include '(Autopopulated)' or '(Required)'.
+    """
     log("🕒 Starting timestamp formatting for Submissions tab...")
 
     ws = sheet.worksheet("Submissions")
     rows = ws.get_all_values()
     headers = rows[0]
+
+    if "Timestamp" not in headers:
+        log("❌ 'Timestamp' column not found in Submissions.")
+        return
+
     timestamp_col_idx = headers.index("Timestamp")
 
-    updated_rows = []
-    for i, row in enumerate(rows[1:], start=2):
+    # Start at sheet row 3 → rows[2] to avoid the template/instructions row
+    for sheet_row_num, row in enumerate(rows[2:], start=3):
         if len(row) <= timestamp_col_idx:
             continue
 
@@ -80,201 +94,19 @@ def reformat_submission_timestamps(sheet):
         if not raw_ts:
             continue
 
-        try:
-            # Try parsing and formatting
-            dt = parser.parse(raw_ts)
-            formatted_ts = dt.strftime("%m/%d/%Y %H:%M")
+        # Ignore instruction/template text
+        if "(Autopopulated)" in raw_ts or "(Required)" in raw_ts:
+            log(f"⏭️ Row {sheet_row_num}: Skipping instructional timestamp cell.")
+            continue
 
-            # Only update if different
+        try:
+            dt = parser.parse(raw_ts)
+            formatted_ts = dt.strftime("%m/%d/%Y %I:%M %p")
             if formatted_ts != raw_ts:
-                ws.update_cell(i, timestamp_col_idx + 1, formatted_ts)
-                log(f"✅ Row {i}: Fixed timestamp → {formatted_ts}")
+                ws.update_cell(sheet_row_num, timestamp_col_idx + 1, formatted_ts)
+                log(f"✅ Row {sheet_row_num}: Fixed timestamp → {formatted_ts}")
         except Exception as e:
-            log(f"⚠️ Row {i}: Could not parse timestamp '{raw_ts}': {e}")
+            # Keep quiet for other weird non-date cells; just note and continue
+            log(f"⏭️ Row {sheet_row_num}: Unparseable timestamp '{raw_ts}'. Skipping.")
 
     log("🎉 Timestamp formatting complete.")
-
-# Rich-text formatting for riddles
-def write_riddle_with_formatting(sheet, ws, row: int):
-    headers = ws.row_values(1)
-    header_map = {h.strip(): i for i, h in enumerate(headers)}
-
-    required_cols = ["Case Number", "Game", "Teaser", "Question", "Newsletter Text"]
-    if not all(col in header_map for col in required_cols):
-        log("Missing one or more required columns for formatting.")
-        return
-
-    row_values = ws.row_values(row)
-    while len(row_values) < len(headers):
-        row_values.append("")
-
-    game = row_values[header_map["Game"]].strip()
-    case_no = row_values[header_map["Case Number"]].strip()
-    teaser = row_values[header_map["Teaser"]].strip()
-    question = row_values[header_map["Question"]].strip()
-    col_index = header_map["Newsletter Text"]
-
-    if not case_no or not question:
-        log(f"Skipping row {row}, missing Case Number or Question.")
-        return
-
-    if game.lower() == "scrambler":
-        # Format scramble: add spaces, uppercase
-        scrambled_text = " ".join(question.upper())
-        requests = [
-            {
-                "updateCells": {
-                    "range": {
-                        "sheetId": ws._properties["sheetId"],
-                        "startRowIndex": row - 1,
-                        "endRowIndex": row,
-                        "startColumnIndex": col_index,
-                        "endColumnIndex": col_index + 1,
-                    },
-                    "rows": [
-                        {
-                            "values": [
-                                {
-                                    "userEnteredValue": {"stringValue": scrambled_text},
-                                    "userEnteredFormat": {
-                                        "textFormat": {
-                                            "fontSize": 25,
-                                            "bold": True,
-                                            "foregroundColor": {
-                                                "red": 12 / 255,
-                                                "green": 115 / 255,
-                                                "blue": 163 / 255,
-                                            }
-                                        }
-                                    },
-                                }
-                            ]
-                        }
-                    ],
-                    "fields": "userEnteredValue,userEnteredFormat.textFormat",
-                }
-            }
-        ]
-        sheet.batch_update({"requests": requests})
-        log(f"🧩 Formatted Scrambler row {row} successfully.")
-        return
-
-    # Riddler format
-    teaser_upper = teaser.upper()
-    case_text = f"(Case No. {case_no}):"
-    full_text = f"{teaser_upper} {case_text} {question}"
-
-    start_case = len(teaser_upper) + 1
-    end_case = start_case + len(case_text)
-
-    requests = [
-        {
-            "updateCells": {
-                "range": {
-                    "sheetId": ws._properties["sheetId"],
-                    "startRowIndex": row - 1,
-                    "endRowIndex": row,
-                    "startColumnIndex": col_index,
-                    "endColumnIndex": col_index + 1,
-                },
-                "rows": [
-                    {
-                        "values": [
-                            {
-                                "userEnteredValue": {"stringValue": full_text},
-                                "textFormatRuns": [
-                                    {
-                                        "startIndex": start_case,
-                                        "format": {"bold": True, "italic": True},
-                                    },
-                                    {
-                                        "startIndex": end_case,
-                                        "format": {"bold": False, "italic": False},
-                                    },
-                                ],
-                            }
-                        ]
-                    }
-                ],
-                "fields": "userEnteredValue,textFormatRuns",
-            }
-        }
-    ]
-    sheet.batch_update({"requests": requests})
-    log(f"🧠 Formatted Riddler row {row} successfully.")
-
-    # Get the header row to map column names to indexes
-    headers = ws.row_values(1)
-    header_map = {h.strip(): i for i, h in enumerate(headers)}
-
-    # Ensure all required columns are present before proceeding
-    required_cols = ["Case Number", "Teaser", "Question", "Newsletter Text"]
-    if not all(col in header_map for col in required_cols):
-        log("Missing one or more required columns for formatting.")
-        return
-
-    # Retrieve the target row's values and pad if necessary
-    row_values = ws.row_values(row)
-    while len(row_values) < len(headers):
-        row_values.append("")
-
-    # Extract the needed fields and strip whitespace
-    case_no = row_values[header_map["Case Number"]].strip()
-    teaser = row_values[header_map["Teaser"]].strip()
-    question = row_values[header_map["Question"]].strip()
-
-    # Skip formatting if essential fields are missing
-    if not case_no or not question:
-        log(f"Skipping row {row}, missing Case Number or Question.")
-        return
-
-    # Format teaser in uppercase, and build the full riddle prompt
-    teaser_upper = teaser.upper()
-    case_text = f"(Case No. {case_no}):"
-    full_text = f"{teaser_upper} {case_text} {question}"
-
-    # Determine the start and end positions of the "Case No." portion for styling
-    start_case = len(teaser_upper) + 1
-    end_case = start_case + len(case_text)
-
-    # Get the column index where the formatted string will be written
-    col_index = header_map["Newsletter Text"]
-
-    # Create a batchUpdate request to write and format the target cell
-    requests = [
-        {
-            "updateCells": {
-                "range": {
-                    "sheetId": ws._properties["sheetId"],
-                    "startRowIndex": row - 1,
-                    "endRowIndex": row,
-                    "startColumnIndex": col_index,
-                    "endColumnIndex": col_index + 1,
-                },
-                "rows": [
-                    {
-                        "values": [
-                            {
-                                "userEnteredValue": {"stringValue": full_text},
-                                "textFormatRuns": [
-                                    {
-                                        "startIndex": start_case,
-                                        "format": {"bold": True, "italic": True},
-                                    },
-                                    {
-                                        "startIndex": end_case,
-                                        "format": {"bold": False, "italic": False},
-                                    },
-                                ],
-                            }
-                        ]
-                    }
-                ],
-                "fields": "userEnteredValue,textFormatRuns",
-            }
-        }
-    ]
-
-    # Submit the formatting request to the Google Sheets API
-    sheet.batch_update({"requests": requests})
-    log(f"Formatted row {row} successfully.")
