@@ -70,8 +70,8 @@ def reformat_submission_timestamps(sheet):
     """
     Normalize Submissions!Timestamp to 'MM/DD/YYYY HH:MM AM/PM'.
 
-    - Skips row 2 (the template/instructions row).
-    - Skips any cells that include '(Autopopulated)' or '(Required)'.
+    - Skips row 2 (template/instructions)
+    - Skips any cells that include (Autopopulated) or (Required)
     """
     log("🕒 Starting timestamp formatting for Submissions tab...")
 
@@ -85,7 +85,6 @@ def reformat_submission_timestamps(sheet):
 
     timestamp_col_idx = headers.index("Timestamp")
 
-    # Start at sheet row 3 → rows[2] to avoid the template/instructions row
     for sheet_row_num, row in enumerate(rows[2:], start=3):
         if len(row) <= timestamp_col_idx:
             continue
