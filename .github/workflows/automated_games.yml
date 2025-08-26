@@ -31,10 +31,13 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Botlight PA
+      - name: Run Games Automation
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          RIDDLE_LABEL_ID: ${{ secrets.RIDDLE_LABEL_ID }}
+          SCRAMBLER_LABEL_ID: ${{ secrets.SCRAMBLER_LABEL_ID }}
+          GOOGLE_APPLICATION_CREDENTIALS: config/token.json
         run: |
           source .venv/bin/activate
-          python3 bot.py all
-        env:
-          GMAIL_LABEL: "Riddles"
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          python3 src/main.py
