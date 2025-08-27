@@ -30,12 +30,13 @@ def _extract_plaintext(payload):
         text = re.sub(r"(?is)<.*?>", "", text)
         return re.sub(r"\n{3,}", "\n\n", text).strip()
 
-    # If body is directly on payload
-    if payload.get("mimeType") == "text/plain":
+    mt = payload.get("mimeType")
+
+    if mt == "text/plain":
         data = payload.get("body", {}).get("data", "")
         return base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore").strip() if data else ""
 
-    if payload.get("mimeType") == "text/html":
+    if mt == "text/html":
         data = payload.get("body", {}).get("data", "")
         html = base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore").strip() if data else ""
         return html_to_text(html)
@@ -111,7 +112,7 @@ def _looks_like_digest_or_moderator(subject: str, from_email: str, body_text: st
         return True
     if "noreply-spamdigest" in f or "via riddler" in f or "no-reply" in f or "noreply" in f:
         return True
-    if body_text and body_text.lower().count("approve: https://groups.google.com") >= 1:
+    if body_text and "approve: https://groups.google.com" in body_text.lower():
         return True
     return False
 
@@ -123,8 +124,9 @@ def _ensure_submission_headers(ws_sub):
         "Email", "Answer", "AI Grade", "AI Confidence", "Override"
     ]
     changed = False
+    norm_existing = {re.sub(r"\s+", " ", (h or "").strip().lower()) for h in headers}
     for col in needed:
-        if col not in headers:
+        if re.sub(r"\s+", " ", col.lower()) not in norm_existing:
             headers.append(col)
             changed = True
     if changed:
@@ -133,80 +135,24 @@ def _ensure_submission_headers(ws_sub):
 
 
 def _load_existing_keys(ws_sub, headers):
-    header_idx = {h: i for i, h in enumerate(headers)}
     all_rows = ws_sub.get_all_values()
     keys = set()
     for r in all_rows[2:]:
-        if len(r) < len(headers):
-            r = r + [""] * (len(headers) - len(r))
-        game = (r[header_idx["Game"]] or "").strip()
-        ts = (r[header_idx["Timestamp"]] or "").strip()
-        email = (r[header_idx["Email"]] or "").strip().lower()
-        ans = (r[header_idx["Answer"]] or "").strip()
+        game = (r[0] if len(r) > 0 else "").strip()
+        ts = (r[1] if len(r) > 1 else "").strip()
+        email = (r[4] if len(r) > 4 else "").strip().lower()
+        ans = (r[5] if len(r) > 5 else "").strip()
         if game and ts and email and ans:
             keys.add((game, email, ts, ans))
-    return keys, header_idx
+    return keys
 
-
-def _hardcoded_cutoff_dt_for_game(game_name: str):
-    g = (game_name or "").strip().lower()
-    if g == "riddler":
-        return dtparser.parse("2025-08-26 6:49:00")
-    if g == "scrambler":
-        return dtparser.parse("2025-08-26 6:49:04")
-    return None
-
-
-def _max_timestamp_for_game(ws_sub, headers, game_name):
-    """
-    Scan Submissions for the latest Timestamp for this Game.
-    Returns (max_dt, raw_string_from_sheet) or (None, None) if not found.
-    """
-    idx = {h: i for i, h in enumerate(headers)}
-    if "Game" not in idx or "Timestamp" not in idx:
-        return (None, None)
-
-    max_dt = None
-    max_raw = None
-    rows = ws_sub.get_all_values()
-    for r in rows[2:]:
-        if len(r) <= idx["Timestamp"]:
-            continue
-        g = (r[idx["Game"]] or "").strip().lower()
-        if g != (game_name or "").strip().lower():
-            continue
-        raw = (r[idx["Timestamp"]] or "").strip()
-        if not raw:
-            continue
-        try:
-            dt = dtparser.parse(raw)
-        except Exception:
-            continue
-        if (max_dt is None) or (dt > max_dt):
-            max_dt = dt
-            max_raw = raw
-    return (max_dt, max_raw)
-
-
-def _append_rows_with_backoff(ws_sub, rows, retries=6, initial_delay=2):
-    if not rows:
-        return True
-    delay = initial_delay
-    for attempt in range(retries):
-        try:
-            ws_sub.append_rows(rows, value_input_option="USER_ENTERED")
-            return True
-        except gspread.exceptions.APIError as e:
-            msg = str(e)
-            if "429" in msg or "Quota exceeded" in msg:
-                log(f"⏳ Sheets quota hit, retrying in {delay}s (attempt {attempt+1}/{retries})...")
-                time.sleep(delay)
-                delay *= 2
-                continue
-            raise
-    log("❌ Failed to append rows after multiple retries due to quota.")
-    return False
-
+def _next_empty_row_in_A_to_I(ws_sub):
+    data = ws_sub.get('A:I')
+    last = 0
+    for i, row in enumerate(data, start=1):
+        if any((cell or "").strip() for cell in row):
+            last = i
+    return max(last + 1, 3)
 
 def list_labels():
     creds = get_credentials()
@@ -227,18 +173,28 @@ def list_labels():
             log(f"✔️ {label_name} Label — Name: {label['name']} | ID: {label_id}")
 
 
-def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = False, since_now: bool = False):
-    """
-    Pull emails from a Gmail label into the Submissions sheet.
+def _extract_answer_from_subject(subject: str, game_name: str) -> str:
+    if not subject:
+        return ""
+    s = subject.strip()
+    s = re.sub(r"(?i)^(re|fw|fwd):\s*", "", s).strip()
 
-    Modes:
-      • Default (fetch_all=False):
-          Only pulls messages newer than the latest Timestamp already in Submissions for this Game, and also newer than the hardcoded cutoff below.
-      • Historical backfill (fetch_all=True):
-          Replays all messages in the label (subject to duplicate key filtering).
-      • From-now-on (since_now=True):
-          Same behavior as default; flag is accepted for API compatibility but not required.
-    """
+    g = (game_name or "").strip()
+    if g:
+        m = re.search(rf"(?i)\b{re.escape(g)}\s*answer[:\-\s]*(.+)$", s)
+        if m:
+            return m.group(1).strip(" '\"–—-").strip()
+
+    m = re.search(r"(?i)\banswer[:\-\s]+(.+)$", s)
+    if m:
+        return m.group(1).strip(" '\"–—-").strip()
+
+    if len(s) <= 120:
+        return s.strip(" '\"–—-").strip()
+
+    return ""
+
+def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = True):
     env_label_id = os.getenv(label_id_env)
     default_label_id = config.RIDDLE_LABEL_ID if game_name.lower() == "riddler" else config.SCRAMBLER_LABEL_ID
     label_id = env_label_id or default_label_id
@@ -251,28 +207,17 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
     service = build("gmail", "v1", credentials=creds)
     ws_sub = sheet.worksheet("Submissions")
 
+    try:
+        log(f"🗂️ Writing to worksheet: {ws_sub.title} (rows before: {len(ws_sub.get_all_values())})")
+    except Exception:
+        pass
+
     headers = _ensure_submission_headers(ws_sub)
-    existing_keys, header_idx = _load_existing_keys(ws_sub, headers)
-
-    last_seen_dt, last_seen_str = _max_timestamp_for_game(ws_sub, headers, game_name)
-    hardcoded_dt = _hardcoded_cutoff_dt_for_game(game_name)
-
-    boundary_dt = None
-    sources = []
-    if last_seen_dt:
-        boundary_dt = last_seen_dt
-        sources.append(f"latest sheet: {last_seen_str}")
-    if hardcoded_dt:
-        boundary_dt = max(boundary_dt, hardcoded_dt) if boundary_dt else hardcoded_dt
-        sources.append("hardcoded cutoff")
-
-    if not fetch_all and boundary_dt:
-        log(f"🧭 Only-new boundary for {game_name}: {', '.join(sources)}")
+    existing_keys = _load_existing_keys(ws_sub, headers)
 
     page_token = None
     pulled_total = 0
     page_num = 0
-    stop_paging = False
 
     while True:
         page_num += 1
@@ -294,9 +239,6 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
         rows_to_append = []
 
         for msg in messages:
-            if stop_paging:
-                break
-
             msg_id = msg.get("id")
             if not msg_id:
                 continue
@@ -314,15 +256,9 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
 
             try:
                 ts_str = _parse_date_to_string(date_header) if date_header else ""
-                ts_dt = dtparser.parse(ts_str) if ts_str else None  # naive
             except Exception:
                 log(f"⏭️ Skipping message {msg_id}: unparseable Date header '{date_header}'")
                 continue
-
-            if not fetch_all and boundary_dt and ts_dt and ts_dt <= boundary_dt:
-                log(f"🛑 Reached time boundary at {ts_str}. Stopping pagination.")
-                stop_paging = True
-                break
 
             first_name, last_initial, email_addr = _parse_sender(from_header)
             body_text = _extract_plaintext(payload)
@@ -332,46 +268,70 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
                 log(f"⏭️ Skipping moderator/digest: {subject[:80]}")
                 continue
 
-            game = game_name
+            if not body_text and subject:
+                guess = _extract_answer_from_subject(subject, game_name)
+                if guess:
+                    body_text = guess
+                    log(f"✳️ Used subject as answer for {email_addr}: {subject[:80]}")
 
-            key = (game, (email_addr or "").lower(), ts_str, body_text)
             if not body_text:
                 log(f"⏭️ Skipping empty-body email from {email_addr} ({subject[:80]})")
                 continue
 
+            key = (game_name, (email_addr or "").lower(), ts_str, body_text)
             if key in existing_keys:
                 continue
 
-            row_map = {h: "" for h in headers}
-            row_map["Game"] = game
-            row_map["Timestamp"] = ts_str
-            row_map["First Name"] = first_name
-            row_map["Last Name Initial"] = last_initial
-            row_map["Email"] = email_addr
-            row_map["Answer"] = body_text
-            row_map["AI Grade"] = ""
-            row_map["AI Confidence"] = ""
-            row_map["Override"] = ""
+            new_row = [
+                game_name,             # Game
+                ts_str,                # Timestamp
+                first_name,            # First Name
+                last_initial,          # Last Name Initial
+                email_addr,            # Email
+                body_text,             # Answer
+                "",                    # AI Grade
+                "",                    # AI Confidence
+                "",                    # Override
+            ]
 
-            new_row = [row_map.get(h, "") for h in headers]
             rows_to_append.append(new_row)
             existing_keys.add(key)
 
         if rows_to_append:
-            ok = _append_rows_with_backoff(ws_sub, rows_to_append, retries=6, initial_delay=2)
-            if ok:
-                pulled_total += len(rows_to_append)
-                log(f"✅ Appended {len(rows_to_append)} {game_name} rows (page {page_num}).")
+            rows_A_to_I = []
+            for r in rows_to_append:
+                row9 = (r + [""] * 9)[:9]
+                rows_A_to_I.append(row9)
 
-        if stop_paging:
+            try:
+                start_row = _next_empty_row_in_A_to_I(ws_sub)
+                end_row = start_row + len(rows_A_to_I) - 1
+
+                ws_sub.update(
+                    f"A{start_row}:I{end_row}",
+                    rows_A_to_I,
+                    value_input_option="USER_ENTERED"
+                )
+
+                pulled_total += len(rows_A_to_I)
+                log(f"✅ Wrote {len(rows_A_to_I)} {game_name} rows to A{start_row}:I{end_row}.")
+
+                try:
+                    preview_start = max(3, end_row - min(10, len(rows_A_to_I)) + 1)
+                    preview = ws_sub.get(f"A{preview_start}:I{end_row}")
+                    log(f"🔎 Confirm A{preview_start}:I{end_row} (showing last 3):")
+                    for row in (preview or [])[-3:]:
+                        pad = (row + ['']*9)[:9]
+                        log(f"   · {pad}")
+                except Exception as e:
+                    log(f"⚠️ Post-write preview failed: {e}")
+
+            except Exception as e:
+                log(f"❌ Failed A:I write: {e}")
+
+        if not fetch_all or not page_token:
             break
-        if not page_token:
-            break
 
-        # Small pause between pages to reduce quota pressure
-        time.sleep(0.5)
+        time.sleep(0.4)
 
-    if fetch_all:
-        log(f"📥 Pulled {pulled_total} {game_name} submission(s) (historical).")
-    else:
-        log(f"📥 Pulled {pulled_total} new {game_name} submission(s).")
+    log(f"📥 Pulled {pulled_total} {game_name} submission(s).")
