@@ -37,27 +37,24 @@ def format_and_populate_all():
 
 if __name__ == "__main__":
     load_dotenv()
-    log("🚀 Starting full automation: formatting, grading, and winner population...")
+    log("🚀 Starting full automation: fetch, format, grade, and winner population...")
 
-    # Fetch all historical emails for both Riddler and Scrambler
-    mail.fetch_emails_for_label(label_id_env="RIDDLE_LABEL_ID", game_name="Riddler", fetch_all=True)
-    mail.fetch_emails_for_label(label_id_env="SCRAMBLER_LABEL_ID", game_name="Scrambler", fetch_all=True)
-
-    # Clean names and timestamps after ingestion
+    # Light cleanup before fetching
     reformat_first_names(sheet)
     reformat_last_initials(sheet)
     reformat_submission_timestamps(sheet)
 
-    # Run the main processing pipeline
+    mail.list_labels()
+
+    mail.fetch_emails_for_label(label_id_env="RIDDLE_LABEL_ID", game_name="Riddler",  fetch_all=False, since_now=True)
+    mail.fetch_emails_for_label(label_id_env="SCRAMBLER_LABEL_ID", game_name="Scrambler", fetch_all=False, since_now=True)
+
+    # Clean the just-added rows
+    reformat_first_names(sheet)
+    reformat_last_initials(sheet)
+    reformat_submission_timestamps(sheet)
+
+    # Grade and populate Winners
     format_and_populate_all()
-
-    # For future, fetch again (newer only)
-    # mail.fetch_emails_for_label(label_id_env="RIDDLE_LABEL_ID", game_name="Riddler", fetch_all=False)
-    # mail.fetch_emails_for_label(label_id_env="SCRAMBLER_LABEL_ID", game_name="Scrambler", fetch_all=False)
-
-    # Re-clean any new rows
-    reformat_first_names(sheet)
-    reformat_last_initials(sheet)
-    reformat_submission_timestamps(sheet)
 
     log("✅ Automation completed successfully.")
