@@ -44,12 +44,11 @@ if __name__ == "__main__":
     reformat_last_initials(sheet)
     reformat_submission_timestamps(sheet)
 
-    mail.list_labels()
+    # Pull everything currently in each label
+    mail.fetch_emails_for_label(label_id_env="RIDDLE_LABEL_ID", game_name="Riddler", fetch_all=True)
+    mail.fetch_emails_for_label(label_id_env="SCRAMBLER_LABEL_ID", game_name="Scrambler", fetch_all=True)
 
-    mail.fetch_emails_for_label(label_id_env="RIDDLE_LABEL_ID", game_name="Riddler",  fetch_all=False, since_now=True)
-    mail.fetch_emails_for_label(label_id_env="SCRAMBLER_LABEL_ID", game_name="Scrambler", fetch_all=False, since_now=True)
-
-    # Clean the just-added rows
+    # Clean formatting after ingest
     reformat_first_names(sheet)
     reformat_last_initials(sheet)
     reformat_submission_timestamps(sheet)
