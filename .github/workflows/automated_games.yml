@@ -16,7 +16,9 @@ jobs:
       - name: Restore OAuth token
         run: |
           mkdir -p config
-          echo "${{ secrets.TOKEN_JSON }}" > config/token.json
+          cat > config/token.json <<'JSON'
+          ${{ secrets.TOKEN_JSON }}
+          JSON
         shell: bash
 
       - name: Setup Python
@@ -37,7 +39,6 @@ jobs:
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           RIDDLE_LABEL_ID: ${{ secrets.RIDDLE_LABEL_ID }}
           SCRAMBLER_LABEL_ID: ${{ secrets.SCRAMBLER_LABEL_ID }}
-          GOOGLE_APPLICATION_CREDENTIALS: config/token.json
         run: |
           source .venv/bin/activate
           python3 src/main.py
