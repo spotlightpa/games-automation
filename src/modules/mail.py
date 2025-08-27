@@ -16,6 +16,7 @@ from modules.auth import get_credentials
 
 client, sheet, ws = get_sheet_and_ws()
 
+
 def _extract_plaintext(payload):
     """
     Recursively extract the best text/plain body from a Gmail payload.
@@ -40,7 +41,7 @@ def _extract_plaintext(payload):
         return html_to_text(html)
 
     # Walk parts recursively
-    for part in payload.get("parts", []) or []:
+    for part in (payload.get("parts", []) or []):
         txt = _extract_plaintext(part)
         if txt:
             return txt
@@ -147,6 +148,46 @@ def _load_existing_keys(ws_sub, headers):
     return keys, header_idx
 
 
+def _hardcoded_cutoff_dt_for_game(game_name: str):
+    g = (game_name or "").strip().lower()
+    if g == "riddler":
+        return dtparser.parse("2025-08-26 6:49:00")
+    if g == "scrambler":
+        return dtparser.parse("2025-08-26 6:49:04")
+    return None
+
+
+def _max_timestamp_for_game(ws_sub, headers, game_name):
+    """
+    Scan Submissions for the latest Timestamp for this Game.
+    Returns (max_dt, raw_string_from_sheet) or (None, None) if not found.
+    """
+    idx = {h: i for i, h in enumerate(headers)}
+    if "Game" not in idx or "Timestamp" not in idx:
+        return (None, None)
+
+    max_dt = None
+    max_raw = None
+    rows = ws_sub.get_all_values()
+    for r in rows[2:]:
+        if len(r) <= idx["Timestamp"]:
+            continue
+        g = (r[idx["Game"]] or "").strip().lower()
+        if g != (game_name or "").strip().lower():
+            continue
+        raw = (r[idx["Timestamp"]] or "").strip()
+        if not raw:
+            continue
+        try:
+            dt = dtparser.parse(raw)
+        except Exception:
+            continue
+        if (max_dt is None) or (dt > max_dt):
+            max_dt = dt
+            max_raw = raw
+    return (max_dt, max_raw)
+
+
 def _append_rows_with_backoff(ws_sub, rows, retries=6, initial_delay=2):
     if not rows:
         return True
@@ -165,6 +206,7 @@ def _append_rows_with_backoff(ws_sub, rows, retries=6, initial_delay=2):
             raise
     log("❌ Failed to append rows after multiple retries due to quota.")
     return False
+
 
 def list_labels():
     creds = get_credentials()
@@ -185,18 +227,17 @@ def list_labels():
             log(f"✔️ {label_name} Label — Name: {label['name']} | ID: {label_id}")
 
 
-def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = True):
+def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = False, since_now: bool = False):
     """
     Pull emails from a Gmail label into the Submissions sheet.
 
-    Behavior:
-      - Sets Game from the label
-      - Parses Date → Timestamp (MM/DD/YYYY HH:MM AM/PM)
-      - Parses From → First Name / Last Name Initial / Email
-      - Extracts plain text body, cleans common signatures/quotes
-      - Dedupes by (Game, Email, Timestamp, Answer)
-      - Skips moderator digests / obvious auto notices
-      - Batches writes per page and retries on 429
+    Modes:
+      • Default (fetch_all=False):
+          Only pulls messages newer than the latest Timestamp already in Submissions for this Game, and also newer than the hardcoded cutoff below.
+      • Historical backfill (fetch_all=True):
+          Replays all messages in the label (subject to duplicate key filtering).
+      • From-now-on (since_now=True):
+          Same behavior as default; flag is accepted for API compatibility but not required.
     """
     env_label_id = os.getenv(label_id_env)
     default_label_id = config.RIDDLE_LABEL_ID if game_name.lower() == "riddler" else config.SCRAMBLER_LABEL_ID
@@ -213,9 +254,25 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
     headers = _ensure_submission_headers(ws_sub)
     existing_keys, header_idx = _load_existing_keys(ws_sub, headers)
 
+    last_seen_dt, last_seen_str = _max_timestamp_for_game(ws_sub, headers, game_name)
+    hardcoded_dt = _hardcoded_cutoff_dt_for_game(game_name)
+
+    boundary_dt = None
+    sources = []
+    if last_seen_dt:
+        boundary_dt = last_seen_dt
+        sources.append(f"latest sheet: {last_seen_str}")
+    if hardcoded_dt:
+        boundary_dt = max(boundary_dt, hardcoded_dt) if boundary_dt else hardcoded_dt
+        sources.append("hardcoded cutoff")
+
+    if not fetch_all and boundary_dt:
+        log(f"🧭 Only-new boundary for {game_name}: {', '.join(sources)}")
+
     page_token = None
     pulled_total = 0
     page_num = 0
+    stop_paging = False
 
     while True:
         page_num += 1
@@ -237,6 +294,9 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
         rows_to_append = []
 
         for msg in messages:
+            if stop_paging:
+                break
+
             msg_id = msg.get("id")
             if not msg_id:
                 continue
@@ -254,9 +314,15 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
 
             try:
                 ts_str = _parse_date_to_string(date_header) if date_header else ""
+                ts_dt = dtparser.parse(ts_str) if ts_str else None  # naive
             except Exception:
                 log(f"⏭️ Skipping message {msg_id}: unparseable Date header '{date_header}'")
                 continue
+
+            if not fetch_all and boundary_dt and ts_dt and ts_dt <= boundary_dt:
+                log(f"🛑 Reached time boundary at {ts_str}. Stopping pagination.")
+                stop_paging = True
+                break
 
             first_name, last_initial, email_addr = _parse_sender(from_header)
             body_text = _extract_plaintext(payload)
@@ -297,10 +363,15 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
                 pulled_total += len(rows_to_append)
                 log(f"✅ Appended {len(rows_to_append)} {game_name} rows (page {page_num}).")
 
-        if not fetch_all or not page_token:
+        if stop_paging:
+            break
+        if not page_token:
             break
 
         # Small pause between pages to reduce quota pressure
         time.sleep(0.5)
 
-    log(f"📥 Pulled {pulled_total} {game_name} submission(s).")
+    if fetch_all:
+        log(f"📥 Pulled {pulled_total} {game_name} submission(s) (historical).")
+    else:
+        log(f"📥 Pulled {pulled_total} new {game_name} submission(s).")
