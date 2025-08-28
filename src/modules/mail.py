@@ -18,6 +18,8 @@ from modules.auth import get_credentials
 
 client, sheet, ws = get_sheet_and_ws()
 
+_TS_FMT = "%m/%d/%Y %I:%M %p"
+
 
 def _extract_plaintext(payload):
     """
@@ -60,7 +62,27 @@ def _parse_date_to_string(date_header: str) -> str:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     dt_local = dt.astimezone(ZoneInfo("America/New_York"))
-    return dt_local.strftime("%m/%d/%Y %I:%M %p")
+    return dt_local.strftime(_TS_FMT)
+
+
+def _normalize_ts_str(s: str) -> str:
+    if not s:
+        return ""
+    try:
+        dt = dtparser.parse(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("America/New_York"))
+        return dt.astimezone(ZoneInfo("America/New_York")).strftime(_TS_FMT)
+    except Exception:
+        return (s or "").strip()
+
+
+def _normalize_answer_for_key(s: str) -> str:
+    if not s:
+        return ""
+    s = s.replace("\xa0", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s.lower()
 
 
 def _parse_sender(from_header: str):
@@ -143,13 +165,18 @@ def _load_existing_keys(ws_sub, headers):
     all_rows = ws_sub.get_all_values()
     keys = set()
     for r in all_rows[2:]:
-        game = (r[0] if len(r) > 0 else "").strip()
-        ts = (r[1] if len(r) > 1 else "").strip()
+        game = (r[0] if len(r) > 0 else "").strip().lower()
+        ts_raw = (r[1] if len(r) > 1 else "").strip()
         email = (r[4] if len(r) > 4 else "").strip().lower()
-        ans = (r[5] if len(r) > 5 else "").strip()
-        if game and ts and email and ans:
-            keys.add((game, email, ts, ans))
+        ans_raw = (r[5] if len(r) > 5 else "").strip()
+
+        ts_norm = _normalize_ts_str(ts_raw)
+        ans_norm = _normalize_answer_for_key(ans_raw)
+
+        if game and ts_norm and email and ans_norm:
+            keys.add((game, email, ts_norm, ans_norm))
     return keys
+
 
 def _next_empty_row_in_A_to_I(ws_sub):
     data = ws_sub.get('A:I')
@@ -158,6 +185,7 @@ def _next_empty_row_in_A_to_I(ws_sub):
         if any((cell or "").strip() for cell in row):
             last = i
     return max(last + 1, 3)
+
 
 def list_labels():
     creds = get_credentials()
@@ -198,6 +226,7 @@ def _extract_answer_from_subject(subject: str, game_name: str) -> str:
         return s.strip(" '\"–—-").strip()
 
     return ""
+
 
 def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = True):
     env_label_id = os.getenv(label_id_env)
@@ -263,7 +292,7 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
             try:
                 if internal_ms:
                     dt = datetime.fromtimestamp(int(internal_ms) / 1000, tz=timezone.utc)
-                    ts_str = dt.astimezone(ZoneInfo("America/New_York")).strftime("%m/%d/%Y %I:%M %p")
+                    ts_str = dt.astimezone(ZoneInfo("America/New_York")).strftime(_TS_FMT)
                 else:
                     ts_str = _parse_date_to_string(date_header) if date_header else ""
             except Exception:
@@ -284,21 +313,24 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
                     body_text = guess
                     log(f"✳️ Used subject as answer for {email_addr}: {subject[:80]}")
 
-            if not body_text:
+            # normalized answer for dedupe key
+            ans_for_key = _normalize_answer_for_key(body_text)
+            if not ans_for_key:
                 log(f"⏭️ Skipping empty-body email from {email_addr} ({subject[:80]})")
                 continue
 
-            key = (game_name, (email_addr or "").lower(), ts_str, body_text)
+            # KEY uses normalized values (game, email, timestamp, answer)
+            key = (game_name.strip().lower(), (email_addr or "").strip().lower(), ts_str, ans_for_key)
             if key in existing_keys:
                 continue
 
             new_row = [
                 game_name,             # Game
-                ts_str,                # Timestamp
+                ts_str,                # Timestamp (canonical NY-local)
                 first_name,            # First Name
                 last_initial,          # Last Name Initial
                 email_addr,            # Email
-                body_text,             # Answer
+                body_text,             # Answer (human-readable cleaned text)
                 "",                    # AI Grade
                 "",                    # AI Confidence
                 "",                    # Override
