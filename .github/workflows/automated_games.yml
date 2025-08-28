@@ -2,7 +2,19 @@ name: Automated Games
 
 on:
   schedule:
-    - cron: '0 18 * * *'    # Daily at 2 p.m. EST
+    # GitHub cron uses UTC
+
+    # SCRAMBLER (Wednesday 07:00 AM → Wednesday 05:30 PM)
+    # Run hourly at :00 from 8:00 AM → 5:00 PM ET, plus a final run at 5:30 PM ET.
+    - cron: '0 12-21 * * 3'
+    - cron: '30 21 * * 3'
+
+    # RIDDLER (Thursday 12:00 PM → Tuesday 05:30 PM)
+    # Run once per day at 12:00 PM ET on Fri, Sat, Sun, Mon, Tue,
+    # plus a final run at 5:30 PM ET on Tuesday.
+    - cron: '0 16 * * 5,6,0,1,2'
+    - cron: '30 21 * * 2'
+
   workflow_dispatch:
 
 jobs:
