@@ -117,23 +117,17 @@ def populate_winners_tab(sheet):
     num_columns = len(winner_headers)
     last_row = len(winners_ws.get_all_values())
     if last_row >= 3:
+        last_col_letter = chr(64 + num_columns)
         winners_ws.update(
-            range_name=f"A3:{chr(64 + num_columns)}{last_row}",
+            range_name=f"A3:{last_col_letter}{last_row}",
             values=[["" for _ in range(num_columns)] for _ in range(last_row - 2)]
         )
+
+    wh = {name.strip(): idx for idx, name in enumerate(winner_headers)}
 
     rows_out = []
 
     for g in games:
-        same_type = [x for x in games if x["game"].lower() == g["game"].lower()]
-        idx = next((i for i, x in enumerate(same_type) if x["row"] == g["row"]), None)
-
-        prev_question = ""
-        prev_answer = ""
-        if idx is not None and idx > 0:
-            prev_question = same_type[idx - 1]["question"]
-            prev_answer = same_type[idx - 1]["answer"]
-
         correct_entries = []
         for s in submissions:
             if (s["game"] or "").strip().lower() != g["game"].strip().lower():
@@ -165,37 +159,30 @@ def populate_winners_tab(sheet):
 
         others_names = [n for n in winners_names if n != swag_name]
 
-        prefix = ""
-        if prev_question and prev_answer:
-            prefix = f"Last week's riddle: {prev_question} — Answer: {prev_answer}. "
-
         if swag_name:
-            full_text = f"{prefix}Congrats to {swag_name}, who will receive Spotlight PA swag."
+            full_text = f"Congrats to {swag_name}, who will receive Spotlight PA swag."
             if others_names:
                 full_text += f" Others who answered correctly: {', '.join(others_names)}."
         else:
-            if prefix:
-                full_text = prefix.rstrip()
-            else:
-                full_text = ""
+            full_text = ""
 
-        row_out = [
-            _fmt_dt(g["start_dt"]),
-            _fmt_dt(g["end_dt"]),
-            g["game"],
-            swag_name,
-            swag_email,
-            ", ".join(winners_names),
-            ", ".join(winners_emails),
-            prev_question,
-            prev_answer,
-            full_text
-        ]
+        values = {
+            "Start Time": _fmt_dt(g["start_dt"]),
+            "End Time": _fmt_dt(g["end_dt"]),
+            "Game": g["game"],
+            "Swag Winner": swag_name,
+            "Swag Winner Email": swag_email,
+            "Winners": ", ".join(winners_names),
+            "Winner Emails": ", ".join(winners_emails),
+            "Full Text": full_text,
+        }
+        row_out = [values.get(col, "") for col in winner_headers]
         rows_out.append(row_out)
 
     if rows_out:
+        last_col_letter = chr(64 + num_columns)
         winners_ws.update(
-            range_name=f"A3:J{2 + len(rows_out)}",
+            range_name=f"A3:{last_col_letter}{2 + len(rows_out)}",
             values=rows_out,
             value_input_option="USER_ENTERED"
         )
