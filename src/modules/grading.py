@@ -237,8 +237,12 @@ User's raw message:
 def populate_ai_grading_prompts():
     """
     Ensure every playable Games row has an AI Grading Prompt.
+    Batched updates to avoid per-cell writes.
     """
     all_rows = ws.get_all_values()
+    if not all_rows:
+        log("ℹ️ No rows in Games.")
+        return
     headers = all_rows[0]
     hm, idx_of = _header_map_loose(headers)
     total_rows = len(all_rows)
@@ -252,39 +256,65 @@ def populate_ai_grading_prompts():
         log("❌ 'AI Grading Prompt' column not found.")
         return
 
-    for row_number in range(3, total_rows + 1):
-        row = all_rows[row_number - 1]
+    pending = []  # list of (row_number, final_output)
 
-        game = row[game_idx].strip() if game_idx is not None and len(row) > game_idx else ""
-        question = row[question_idx].strip() if question_idx is not None and len(row) > question_idx else ""
-        answer = row[answer_idx].strip() if answer_idx is not None and len(row) > answer_idx else ""
-        existing_guidance = row[grading_idx].strip() if grading_idx is not None and len(row) > grading_idx else ""
+    for row_number in range(3, total_rows + 1):
+        row = (all_rows[row_number - 1] + [""] * (grading_idx + 1))[:max(len(all_rows[0]), grading_idx + 1)]
+
+        game = row[game_idx].strip() if game_idx is not None else ""
+        question = row[question_idx].strip() if question_idx is not None else ""
+        answer = row[answer_idx].strip() if answer_idx is not None else ""
+        existing_guidance = row[grading_idx].strip() if grading_idx is not None else ""
 
         if not question or not answer:
-            log(f"⏭️ Skipping row {row_number}, missing question or answer.")
             continue
 
-        # Skip if already has AI-generated content
         if existing_guidance.lower().startswith("ai:"):
-            log(f"✅ Row {row_number} already has AI grading prompt, skipping.")
             continue
 
         log(f"⚙️ Generating grading logic for row {row_number} ({game})...")
-
         grading_logic = generate_grading_logic(
             game_type=game,
             question=question,
             answer=answer,
             existing_guidance=existing_guidance
         )
-
         if not grading_logic:
             log(f"⚠️ Row {row_number}: No grading logic generated.")
             continue
 
         final_output = f"{existing_guidance.strip()}\nAI: {grading_logic}" if existing_guidance else f"AI: {grading_logic}"
-        ws.update_cell(row_number, grading_idx + 1, final_output.strip())
-        log(f"📝 Updated grading logic for row {row_number}.")
+        pending.append((row_number, final_output.strip()))
+
+    if not pending:
+        log("✅ All Games rows already have AI grading prompts.")
+        return
+
+    # Coalesce into contiguous blocks in the grading column
+    pending.sort(key=lambda x: x[0])
+    blocks = []
+    start = end = pending[0][0]
+    buf = [pending[0][1]]
+    for r, val in pending[1:]:
+        if r == end + 1:
+            end = r
+            buf.append(val)
+        else:
+            blocks.append((start, end, buf))
+            start = end = r
+            buf = [val]
+    blocks.append((start, end, buf))
+
+    col_letter = chr(65 + grading_idx)  # 0-based -> letter
+    ranges = []
+    for start, end, values in blocks:
+        ranges.append({
+            "range": f"{col_letter}{start}:{col_letter}{end}",
+            "values": [[v] for v in values]
+        })
+
+    ws.batch_update(ranges, value_input_option="USER_ENTERED")
+    log(f"📝 Updated grading logic for {sum(len(b[2]) for b in blocks)} row(s) in Games.")
 
 
 # Determines if a submission is marked correct, considering override first

@@ -389,48 +389,28 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
             existing_keys.add(key)
 
         if rows_to_append:
-            start_row = _next_empty_row(ws_sub, len(headers))
-            end_row = start_row + len(rows_to_append) - 1
-            last_col_letter = _col_letter(len(headers))
             try:
-                ws_sub.update(
-                    f"A{start_row}:{last_col_letter}{end_row}",
-                    rows_to_append,
-                    value_input_option="USER_ENTERED"
-                )
+                ws_sub.append_rows(rows_to_append, value_input_option="USER_ENTERED")
                 pulled_total += len(rows_to_append)
-                log(f"✅ Wrote {len(rows_to_append)} {game_name} rows to A{start_row}:{last_col_letter}{end_row}.")
-                # update in-memory mapping for these new rows for any later duplicates in same batch
-                for offset, row_vals in enumerate(rows_to_append):
-                    i = start_row + offset
-                    ans_norm = _normalize_answer_for_key(row_vals[headers.index("Answer")])
-                    k = (
-                        row_vals[headers.index("Game")].strip().lower(),
-                        row_vals[headers.index("Email")].strip().lower(),
-                        row_vals[headers.index("Timestamp")].strip(),
-                        ans_norm,
-                    )
-                    key_to_row[k] = i
-
-                try:
-                    preview_start = max(3, end_row - min(10, len(rows_to_append)) + 1)
-                    preview = ws_sub.get(f"A{preview_start}:{last_col_letter}{end_row}")
-                    log(f"🔎 Confirm A{preview_start}:{last_col_letter}{end_row} (showing last 3):")
-                    for row in (preview or [])[-3:]:
-                        pad = (row + [''] * len(headers))[:len(headers)]
-                        log(f"   · {pad}")
-                except Exception as e:
-                    log(f"⚠️ Post-write preview failed: {e}")
-
+                log(f"✅ Appended {len(rows_to_append)} {game_name} rows.")
             except Exception as e:
-                log(f"❌ Failed write: {e}")
+                log(f"❌ Append failed: {e}")
 
         if link_updates:
-            for row_idx, link in link_updates:
-                try:
-                    ws_sub.update_cell(row_idx, link_col_idx + 1, link)
-                except Exception as e:
-                    log(f"⚠️ Link backfill failed at row {row_idx}: {e}")
+            try:
+                requests = []
+                link_col_letter = _col_letter(link_col_idx + 1)
+                for row_idx, link in link_updates:
+                    requests.append({
+                        "range": f"{link_col_letter}{row_idx}:{link_col_letter}{row_idx}",
+                        "values": [[link]]
+                    })
+                if requests:
+                    ws_sub.batch_update([{"range": r["range"], "values": r["values"]} for r in requests], value_input_option="USER_ENTERED")
+                    log(f"🔗 Backfilled {len(requests)} link(s) in one batch.")
+            except Exception as e:
+                log(f"⚠️ Link backfill batch failed: {e}")
+
 
         if not fetch_all or not page_token:
             break
