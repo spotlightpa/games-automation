@@ -303,6 +303,15 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
             body_text = _extract_plaintext(payload)
             body_text = _clean_answer(body_text)
 
+            # Always include subject line at the top of the answer for context
+            if subject:
+                subj_clean = subject.strip()
+                if subj_clean:
+                    if body_text:
+                        body_text = f"Subject: {subj_clean}\n\n{body_text}"
+                    else:
+                        body_text = f"Subject: {subj_clean}"
+
             if _looks_like_digest_or_moderator(subject, email_addr, body_text):
                 log(f"⏭️ Skipping moderator/digest: {subject[:80]}")
                 continue
