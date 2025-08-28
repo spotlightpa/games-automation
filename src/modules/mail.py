@@ -21,6 +21,14 @@ client, sheet, ws = get_sheet_and_ws()
 _TS_FMT = "%m/%d/%Y %I:%M %p"
 
 
+def _col_letter(n: int) -> str:
+    s = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
 def _extract_plaintext(payload):
     """
     Recursively extract the best text/plain body from a Gmail payload.
@@ -81,8 +89,13 @@ def _normalize_answer_for_key(s: str) -> str:
     if not s:
         return ""
     s = s.replace("\xa0", " ")
-    s = re.sub(r"\s+", " ", s).strip()
-    return s.lower()
+    # drop leading "Subject: ..." line, if present, for stable dedupe
+    lines = s.splitlines()
+    if lines and re.match(r"(?i)^\s*subject\s*:", lines[0]):
+        lines = lines[1:]
+    s = "\n".join(lines)
+    s = re.sub(r"\s+", " ", s).strip().lower()
+    return s
 
 
 def _parse_sender(from_header: str):
@@ -148,14 +161,26 @@ def _ensure_submission_headers(ws_sub):
     headers = ws_sub.row_values(1)
     needed = [
         "Game", "Timestamp", "First Name", "Last Name Initial",
-        "Email", "Answer", "AI Grade", "AI Confidence", "Override"
+        "Email", "Answer", "AI Grade", "AI Confidence", "Override", "Link"
     ]
+    norm_existing = {re.sub(r"\s+", " ", (h or "").strip().lower()): i for i, h in enumerate(headers)}
     changed = False
-    norm_existing = {re.sub(r"\s+", " ", (h or "").strip().lower()) for h in headers}
-    for col in needed:
+
+    for col in needed[:-1]:
         if re.sub(r"\s+", " ", col.lower()) not in norm_existing:
             headers.append(col)
+            norm_existing[re.sub(r"\s+", " ", col.lower())] = len(headers) - 1
             changed = True
+
+    norm_override = re.sub(r"\s+", " ", "Override".lower())
+    norm_link = re.sub(r"\s+", " ", "Link".lower())
+    if norm_link not in norm_existing:
+        override_idx = norm_existing.get(norm_override, len(headers) - 1)
+        insert_at = override_idx + 1
+        headers.insert(insert_at, "Link")
+        norm_existing = {re.sub(r"\s+", " ", (h or "").strip().lower()): i for i, h in enumerate(headers)}
+        changed = True
+
     if changed:
         ws_sub.update("A1", [headers])
     return headers
@@ -164,7 +189,8 @@ def _ensure_submission_headers(ws_sub):
 def _load_existing_keys(ws_sub, headers):
     all_rows = ws_sub.get_all_values()
     keys = set()
-    for r in all_rows[2:]:
+    key_to_row = {}
+    for row_idx, r in enumerate(all_rows[2:], start=3):
         game = (r[0] if len(r) > 0 else "").strip().lower()
         ts_raw = (r[1] if len(r) > 1 else "").strip()
         email = (r[4] if len(r) > 4 else "").strip().lower()
@@ -174,13 +200,16 @@ def _load_existing_keys(ws_sub, headers):
         ans_norm = _normalize_answer_for_key(ans_raw)
 
         if game and ts_norm and email and ans_norm:
-            keys.add((game, email, ts_norm, ans_norm))
-    return keys
+            k = (game, email, ts_norm, ans_norm)
+            keys.add(k)
+            key_to_row[k] = row_idx
+    return keys, key_to_row
 
 
-def _next_empty_row_in_A_to_I(ws_sub):
-    data = ws_sub.get('A:I')
+def _next_empty_row(ws_sub, num_cols: int):
     last = 0
+    last_col_letter = _col_letter(num_cols)
+    data = ws_sub.get(f"A:{last_col_letter}")
     for i, row in enumerate(data, start=1):
         if any((cell or "").strip() for cell in row):
             last = i
@@ -247,7 +276,10 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
         pass
 
     headers = _ensure_submission_headers(ws_sub)
-    existing_keys = _load_existing_keys(ws_sub, headers)
+    existing_keys, key_to_row = _load_existing_keys(ws_sub, headers)
+
+    header_map = {h.strip(): i for i, h in enumerate(headers)}
+    link_col_idx = header_map.get("Link", len(headers) - 1)
 
     page_token = None
     pulled_total = 0
@@ -255,11 +287,7 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
 
     while True:
         page_num += 1
-        req = {
-            "userId": "me",
-            "labelIds": [label_id],
-            "maxResults": 100,
-        }
+        req = {"userId": "me", "labelIds": [label_id], "maxResults": 100}
         if page_token:
             req["pageToken"] = page_token
 
@@ -271,6 +299,7 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
             break
 
         rows_to_append = []
+        link_updates = []  # (row_idx, link)
 
         for msg in messages:
             msg_id = msg.get("id")
@@ -303,23 +332,21 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
             body_text = _extract_plaintext(payload)
             body_text = _clean_answer(body_text)
 
-            # Always include subject line at the top of the answer for context
-            if subject:
-                subj_clean = subject.strip()
-                if subj_clean:
-                    if body_text:
-                        body_text = f"Subject: {subj_clean}\n\n{body_text}"
-                    else:
-                        body_text = f"Subject: {subj_clean}"
-
             if _looks_like_digest_or_moderator(subject, email_addr, body_text):
                 log(f"⏭️ Skipping moderator/digest: {subject[:80]}")
                 continue
 
+            subj_clean = (subject or "").strip()
+            if subj_clean:
+                if body_text:
+                    body_text = f"Subject: {subj_clean}\n\n{body_text}"
+                else:
+                    body_text = f"Subject: {subj_clean}"
+
             if not body_text and subject:
                 guess = _extract_answer_from_subject(subject, game_name)
                 if guess:
-                    body_text = guess
+                    body_text = f"Subject: {subject.strip()}\n\n{guess}"
                     log(f"✳️ Used subject as answer for {email_addr}: {subject[:80]}")
 
             # normalized answer for dedupe key
@@ -328,57 +355,82 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
                 log(f"⏭️ Skipping empty-body email from {email_addr} ({subject[:80]})")
                 continue
 
-            # KEY uses normalized values (game, email, timestamp, answer)
+            msg_link = f"https://mail.google.com/mail/u/0/#all/{msg_id}"
+
             key = (game_name.strip().lower(), (email_addr or "").strip().lower(), ts_str, ans_for_key)
             if key in existing_keys:
+                # backfill Link if empty
+                row_idx = key_to_row.get(key)
+                if row_idx:
+                    try:
+                        curr = ws_sub.get(f"{_col_letter(link_col_idx+1)}{row_idx}:{_col_letter(link_col_idx+1)}{row_idx}")
+                        curr_val = curr[0][0] if curr and curr[0] else ""
+                    except Exception:
+                        curr_val = ""
+                    if not curr_val:
+                        link_updates.append((row_idx, msg_link))
                 continue
 
-            new_row = [
-                game_name,             # Game
-                ts_str,                # Timestamp (canonical NY-local)
-                first_name,            # First Name
-                last_initial,          # Last Name Initial
-                email_addr,            # Email
-                body_text,             # Answer (human-readable cleaned text)
-                "",                    # AI Grade
-                "",                    # AI Confidence
-                "",                    # Override
-            ]
+            new_row_values = {
+                "Game": game_name,
+                "Timestamp": ts_str,
+                "First Name": first_name,
+                "Last Name Initial": last_initial,
+                "Email": email_addr,
+                "Answer": body_text,
+                "AI Grade": "",
+                "AI Confidence": "",
+                "Override": "",
+                "Link": msg_link,
+            }
+            row = [new_row_values.get(h, "") for h in headers]
+            rows_to_append.append(row)
 
-            rows_to_append.append(new_row)
             existing_keys.add(key)
 
         if rows_to_append:
-            rows_A_to_I = []
-            for r in rows_to_append:
-                row9 = (r + [""] * 9)[:9]
-                rows_A_to_I.append(row9)
-
+            start_row = _next_empty_row(ws_sub, len(headers))
+            end_row = start_row + len(rows_to_append) - 1
+            last_col_letter = _col_letter(len(headers))
             try:
-                start_row = _next_empty_row_in_A_to_I(ws_sub)
-                end_row = start_row + len(rows_A_to_I) - 1
-
                 ws_sub.update(
-                    f"A{start_row}:I{end_row}",
-                    rows_A_to_I,
+                    f"A{start_row}:{last_col_letter}{end_row}",
+                    rows_to_append,
                     value_input_option="USER_ENTERED"
                 )
-
-                pulled_total += len(rows_A_to_I)
-                log(f"✅ Wrote {len(rows_A_to_I)} {game_name} rows to A{start_row}:I{end_row}.")
+                pulled_total += len(rows_to_append)
+                log(f"✅ Wrote {len(rows_to_append)} {game_name} rows to A{start_row}:{last_col_letter}{end_row}.")
+                # update in-memory mapping for these new rows for any later duplicates in same batch
+                for offset, row_vals in enumerate(rows_to_append):
+                    i = start_row + offset
+                    ans_norm = _normalize_answer_for_key(row_vals[headers.index("Answer")])
+                    k = (
+                        row_vals[headers.index("Game")].strip().lower(),
+                        row_vals[headers.index("Email")].strip().lower(),
+                        row_vals[headers.index("Timestamp")].strip(),
+                        ans_norm,
+                    )
+                    key_to_row[k] = i
 
                 try:
-                    preview_start = max(3, end_row - min(10, len(rows_A_to_I)) + 1)
-                    preview = ws_sub.get(f"A{preview_start}:I{end_row}")
-                    log(f"🔎 Confirm A{preview_start}:I{end_row} (showing last 3):")
+                    preview_start = max(3, end_row - min(10, len(rows_to_append)) + 1)
+                    preview = ws_sub.get(f"A{preview_start}:{last_col_letter}{end_row}")
+                    log(f"🔎 Confirm A{preview_start}:{last_col_letter}{end_row} (showing last 3):")
                     for row in (preview or [])[-3:]:
-                        pad = (row + ['']*9)[:9]
+                        pad = (row + [''] * len(headers))[:len(headers)]
                         log(f"   · {pad}")
                 except Exception as e:
                     log(f"⚠️ Post-write preview failed: {e}")
 
             except Exception as e:
-                log(f"❌ Failed A:I write: {e}")
+                log(f"❌ Failed write: {e}")
+
+        if link_updates:
+            for row_idx, link in link_updates:
+                try:
+                    ws_sub.update_cell(row_idx, link_col_idx + 1, link)
+                except Exception as e:
+                    log(f"⚠️ Link backfill failed at row {row_idx}: {e}")
 
         if not fetch_all or not page_token:
             break
