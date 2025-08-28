@@ -5,6 +5,8 @@ import base64
 import gspread
 from email.utils import parseaddr
 from dateutil import parser as dtparser
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from googleapiclient.discovery import build
 from modules.first_names import normalize_first_name
@@ -55,7 +57,10 @@ def _extract_plaintext(payload):
 
 def _parse_date_to_string(date_header: str) -> str:
     dt = dtparser.parse(date_header)
-    return dt.strftime("%m/%d/%Y %I:%M %p")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt_local = dt.astimezone(ZoneInfo("America/New_York"))
+    return dt_local.strftime("%m/%d/%Y %I:%M %p")
 
 
 def _parse_sender(from_header: str):
@@ -253,11 +258,16 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
             subject = hget("Subject", "")
             from_header = hget("From", "")
             date_header = hget("Date", "")
+            internal_ms = message.get("internalDate")
 
             try:
-                ts_str = _parse_date_to_string(date_header) if date_header else ""
+                if internal_ms:
+                    dt = datetime.fromtimestamp(int(internal_ms) / 1000, tz=timezone.utc)
+                    ts_str = dt.astimezone(ZoneInfo("America/New_York")).strftime("%m/%d/%Y %I:%M %p")
+                else:
+                    ts_str = _parse_date_to_string(date_header) if date_header else ""
             except Exception:
-                log(f"⏭️ Skipping message {msg_id}: unparseable Date header '{date_header}'")
+                log(f"⏭️ Skipping message {msg_id}: unparseable Date/internalDate")
                 continue
 
             first_name, last_initial, email_addr = _parse_sender(from_header)
