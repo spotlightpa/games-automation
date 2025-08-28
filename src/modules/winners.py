@@ -46,7 +46,7 @@ def populate_winners_tab(sheet):
     subs_ws = sheet.worksheet("Submissions")
     winners_ws = sheet.worksheet("Winners")
 
-    games_raw = games_ws.get_all_values()
+    games_raw = _safe_get_all_values(games_ws)
     headers = games_raw[0]
     h = {name.strip(): idx for idx, name in enumerate(headers)}
 
@@ -81,13 +81,15 @@ def populate_winners_tab(sheet):
 
     games.sort(key=lambda r: (r["game"].lower(), r["start_dt"]))
 
-    subs_raw = subs_ws.get_all_values()
+    subs_raw = _safe_get_all_values(subs_ws)
     sub_headers = subs_raw[0] if subs_raw else []
     sh = {name.strip(): idx for idx, name in enumerate(sub_headers)}
     needed_sub_cols = ["Game", "Timestamp", "First Name", "Last Name Initial", "Email", "AI Grade", "Override"]
     if not all(col in sh for col in needed_sub_cols):
         log("❌ Submissions sheet missing required columns.")
         return
+
+    link_idx = sh.get("Link")
 
     submissions = []
     for i, row in enumerate(subs_raw[2:], start=3):
@@ -100,6 +102,7 @@ def populate_winners_tab(sheet):
         email = (row[sh["Email"]] or "").strip()
         ai_grade = (row[sh["AI Grade"]] or "").strip()
         override = (row[sh["Override"]] or "").strip()
+        link_val = (row[link_idx] or "").strip() if link_idx is not None and len(row) > link_idx else ""
         submissions.append({
             "row": i,
             "game": gtype,
@@ -108,16 +111,16 @@ def populate_winners_tab(sheet):
             "Last Name Initial": last_initial,
             "Email": email,
             "AI Grade": ai_grade,
-            "Override": override
+            "Override": override,
+            "Link": link_val,
         })
 
     previous_winner_emails = _load_previous_winner_emails(sheet)
 
-    winner_headers = winners_ws.row_values(1)
+    winner_headers = _safe_row_values(winners_ws, 1)
     num_columns = len(winner_headers)
 
-    # capture existing rows BEFORE clearing to preserve swag winner if still valid
-    existing_rows = winners_ws.get_all_values()
+    existing_rows = _safe_get_all_values(winners_ws)
     existing_map = {}
     if existing_rows and len(existing_rows) >= 3:
         wh_existing = {name.strip(): idx for idx, name in enumerate(existing_rows[0])}
@@ -134,10 +137,15 @@ def populate_winners_tab(sheet):
     last_row = len(existing_rows)
     if last_row >= 3:
         last_col_letter = chr(64 + num_columns)
-        winners_ws.update(
+        _safe_update(
+            winners_ws,
             range_name=f"A3:{last_col_letter}{last_row}",
-            values=[["" for _ in range(num_columns)] for _ in range(last_row - 2)]
+            values=[["" for _ in range(num_columns)] for _ in range(last_row - 2)],
+            value_input_option="USER_ENTERED"
         )
+
+    wh = {name.strip(): idx for idx, name in enumerate(winner_headers)}
+    has_swag_link_col = "Swag Winner Link" in wh
 
     rows_out = []
 
@@ -161,14 +169,17 @@ def populate_winners_tab(sheet):
         # Sorted, de-duped winners by display name
         winners_names = [display_name(e) for e in correct_entries_sorted]
         winners_emails = [e["Email"] for e in correct_entries_sorted]
-        combined = sorted(zip(winners_names, winners_emails), key=lambda x: x[0].lower())
+
+        combined = sorted(zip(winners_names, winners_emails, correct_entries_sorted), key=lambda x: x[0].lower())
         seen_names = set()
         winners_names_sorted = []
         winners_emails_sorted = []
-        for n, em in combined:
+        winners_entries_sorted = []
+        for n, em, entry in combined:
             if n not in seen_names:
                 winners_names_sorted.append(n)
                 winners_emails_sorted.append(em)
+                winners_entries_sorted.append(entry)
                 seen_names.add(n)
 
         # Winner emails: alphabetize and dedupe case-insensitively
@@ -185,13 +196,19 @@ def populate_winners_tab(sheet):
         # Preserve swag winner if still valid; otherwise choose anew
         swag_name = ""
         swag_email = ""
+        swag_link = ""
+
         pairs_all = {(display_name(e), (e["Email"] or "").strip()) for e in correct_entries_sorted}
-        key = (_fmt_dt(g["start_dt"]), _fmt_dt(g["end_dt"]), g["game"])
-        prior_swag_name, prior_swag_email = existing_map.get(key, ("", ""))
+        key_tuple = (_fmt_dt(g["start_dt"]), _fmt_dt(g["end_dt"]), g["game"])
+        prior_swag_name, prior_swag_email = existing_map.get(key_tuple, ("", ""))
 
         if prior_swag_name and prior_swag_email:
             if (prior_swag_name, prior_swag_email) in pairs_all and (prior_swag_email or "").strip().lower() not in previous_winner_emails:
                 swag_name, swag_email = prior_swag_name, prior_swag_email
+                for e in correct_entries_sorted:
+                    if display_name(e) == swag_name and (e["Email"] or "").strip() == swag_email:
+                        swag_link = (e.get("Link") or "").strip()
+                        break
 
         if not swag_name:
             eligible = [e for e in correct_entries_sorted if (e["Email"] or "").strip().lower() not in previous_winner_emails]
@@ -200,6 +217,7 @@ def populate_winners_tab(sheet):
                 choice = random.choice(pool)
                 swag_name = display_name(choice)
                 swag_email = choice["Email"]
+                swag_link = (choice.get("Link") or "").strip()
 
         others_names = [n for n in winners_names_sorted if n != swag_name]
 
@@ -224,12 +242,16 @@ def populate_winners_tab(sheet):
             "Winner Emails": ", ".join(winner_emails_alpha),
             "Full Text": full_text,
         }
+        if has_swag_link_col:
+            values["Swag Winner Link"] = swag_link
+
         row_out = [values.get(col, "") for col in winner_headers]
         rows_out.append(row_out)
 
     if rows_out:
         last_col_letter = chr(64 + num_columns)
-        winners_ws.update(
+        _safe_update(
+            winners_ws,
             range_name=f"A3:{last_col_letter}{2 + len(rows_out)}",
             values=rows_out,
             value_input_option="USER_ENTERED"
