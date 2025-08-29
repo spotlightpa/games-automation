@@ -7,7 +7,6 @@ from modules import config
 from modules.logging_utils import log
 from modules.auth import get_openai_client, GENERIC_GRADING_INSTRUCTIONS
 from modules.auth import get_credentials
-from helpers.utils import rows_to_dicts
 from helpers.tokens import log_token_usage
 
 
@@ -37,12 +36,65 @@ def _header_map_loose(headers):
     return hm, idx_of
 
 
+def _normalize_letters(s: str) -> str:
+    """letters-only, lowercase"""
+    return re.sub(r"[^A-Za-z]+", "", (s or "")).lower()
+
+
+def _parse_scrambler_answer_list(answer: str):
+    """
+    Parse the Scrambler 'Answer' cell into:
+      - display: ordered, human-readable list (de-duped by letters-only)
+      - targets: set of normalized (letters-only) answers for comparison
+
+    Be flexible about separators. We treat separators as things such as:
+    commas, semicolons, slashes, pipes, bullets, newlines, the words 'or'/'and',
+    and even runs of extra spaces. We still keep each candidate's internal spaces
+    or hyphens for display, but the match is letters-only.
+    """
+    if not (answer or "").strip():
+        return [], set()
+
+    s = answer
+
+    # Normalize common textual separators to commas
+    s = re.sub(r"\b(?:or|and)\b", ",", s, flags=re.IGNORECASE)
+    s = s.replace("•", ",").replace("·", ",").replace("|", ",").replace("•", ",")
+    s = re.sub(r"[;/\n]+", ",", s)
+
+    # Collapse repeated commas/spaces
+    s = re.sub(r"\s*,\s*", ",", s)
+    s = re.sub(r",\s*,+", ",", s).strip(" ,")
+
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+
+    # If it still looks like a single blob, try a very gentle split on big gaps
+    if len(parts) <= 1:
+        parts = [p for p in re.split(r"\s{2,}", s) if p.strip()]
+
+    display = []
+    seen_norm = set()
+    for p in parts:
+        # Keep nice display (trim), but dedupe by letters-only
+        disp = p.strip()
+        norm = _normalize_letters(disp)
+        if not norm:
+            continue
+        if norm not in seen_norm:
+            seen_norm.add(norm)
+            display.append(disp)
+
+    return display, seen_norm
+
+
 def build_games_index():
     """
     Returns a list of dicts for each playable row in Games with parsed datetimes.
     Keys: game, start_dt, end_dt, question, answer, grading, row_number
     """
     all_rows = ws.get_all_values()
+    if not all_rows:
+        return []
     headers = all_rows[0]
     hm, idx_of = _header_map_loose(headers)
 
@@ -64,12 +116,12 @@ def build_games_index():
         if len(row) < len(headers):
             row = row + [""] * (len(headers) - len(row))
 
-        start_dt = _parse_dt_safe(row[col_start].strip())
-        end_dt = _parse_dt_safe(row[col_end].strip())
-        game = row[col_game].strip()
-        question = row[col_question].strip()
-        answer = row[col_answer].strip()
-        grading = row[col_grading].strip()
+        start_dt = _parse_dt_safe((row[col_start] or "").strip())
+        end_dt = _parse_dt_safe((row[col_end] or "").strip())
+        game = (row[col_game] or "").strip()
+        question = (row[col_question] or "").strip()
+        answer = (row[col_answer] or "").strip()
+        grading = (row[col_grading] or "").strip()
 
         if not game or not start_dt or not end_dt:
             continue
@@ -138,29 +190,21 @@ def _openai_chat_safe(messages, model="gpt-4o", temperature=0, max_tokens=250):
 
 
 def generate_grading_logic(game_type: str, question: str, answer: str, existing_guidance: str = "") -> str:
-    global total_token_cost
+    """
+    Returns the short grading logic string that gets pasted into the sheet.
+    (We keep the long, explicit instructions internally in grade_submission_entry.)
+    """
+    if (game_type or "").strip().lower() == "scrambler":
+        display_list, _ = _parse_scrambler_answer_list(answer)
+        if not display_list:
+            return f"Accepted answer: must use all and only the letters from {question}."
+        if len(display_list) == 1:
+            return f"Accepted answer: {display_list[0]}"
+        return f"Accepted answers: {', '.join(display_list)}"
 
-    if game_type.lower() == "scrambler":
-        prompt = f"""
-You are grading a word scramble.
+    prompt = f"""{GENERIC_GRADING_INSTRUCTIONS}
 
-Scrambled letters: {question}
-Expected answer(s): {answer}
-
-{(existing_guidance or "").strip()}
-
-Instructions:
-- Assume the system already knows how to grade a Scrambler.
-- Do NOT repeat grading rules or letter counts.
-- Just provide any additional accepted answers, or state clearly that the only accepted answer is the one listed.
-- Be brief and specific.
-
-Your response will be used to assist human editors and should be direct.
-""".strip()
-    else:
-        prompt = f"""{GENERIC_GRADING_INSTRUCTIONS}
-
-{(existing_guidance or "").strip()}
+{(existing_guidance or '').strip()}
 
 Riddle Question: {question}
 Correct Answer: {answer}
@@ -174,6 +218,7 @@ Provide grading logic:""".strip()
         max_tokens=250
     )
     if usage:
+        global total_token_cost
         total_token_cost += log_token_usage(usage)
     return text
 
@@ -198,18 +243,15 @@ def grade_submission_entry(grading_prompt, user_answer):
 
     prompt = f"""{grading_prompt.strip()}
 
-You are grading a riddle submission that was copied from an email. The raw text may contain the user's answer plus non-answer content (e.g., signatures, legal disclaimers, quotes, addresses/phone numbers, URLs, reply headers, or
-other footers).
+You are grading a riddle submission that was copied from an email. The raw text may contain the user's answer plus non-answer content (e.g., signatures, legal disclaimers, quotes, addresses/phone numbers, URLs, reply headers, or other footers).
 
 INSTRUCTIONS:
 1) Identify the candidate answer: the earliest, shortest span that clearly attempts to answer the puzzle.
    • Prefer the first non-empty line(s) that read as an answer.
-   • Stop when you reach common signature/disclaimer markers (mobile signatures, lines like "Sent from", "Regards",
-     "Thank you", dash separators, quoted-reply markers such as "On ... wrote:"), or when content shifts to contact info,
-     legal notices, or unrelated quotations.
+   • Stop when you reach common signature/disclaimer markers (mobile signatures, lines like "Sent from", "Regards", "Thank you", dash separators, quoted-reply markers such as "On ... wrote:"), or when content shifts to contact info, legal notices, or unrelated quotations.
    • If multiple guesses appear, grade the first clear answer.
 2) Judge correctness ONLY using the candidate answer — ignore any trailing non-answer content.
-3) Ignore case, punctuation, filler words, and trivial formatting differences.
+3) Ignore case, punctuation, filler words, and trivial formatting differences. If the grading logic says to treat the answer in letters-only form, remove ALL non-letters (e.g., *, spaces, punctuation, markdown) before comparing.
 4) Be faithful to the riddle’s intended meaning per the grading logic.
 
 Respond in this format exactly:
@@ -338,6 +380,9 @@ def grade_submissions_for_sheet(sheet_name: str):
     ws_sub = sheet.worksheet(sheet_name)
 
     all_rows = ws_sub.get_all_values()
+    if not all_rows:
+        log("ℹ️ No rows to grade.")
+        return
     headers = all_rows[0]
 
     header_set = {(h or "").strip() for h in headers}
