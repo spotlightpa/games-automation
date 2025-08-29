@@ -97,19 +97,53 @@ def _normalize_answer_for_key(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip().lower()
     return s
 
+def _pick_personal_sender(from_header: str, reply_to_header: str, list_aliases=None):
+    """
+    Prefer the personal sender in Reply-To when the message arrived via a
+    list alias like riddler@spotlightpa.org or scrambler@spotlightpa.org.
+    Falls back to From if Reply-To is unusable.
+    """
+    if list_aliases is None:
+        list_aliases = {"riddler@spotlightpa.org", "scrambler@spotlightpa.org"}
 
-def _parse_sender(from_header: str):
-    name, email = parseaddr(from_header)
-    email = email or from_header.strip()
+    from_name, from_email = parseaddr(from_header or "")
+    rt_name, rt_email = parseaddr(reply_to_header or "")
 
-    # Derive names
-    name_clean = re.sub(r"[\"']", "", name).strip()
+    from_email_l = (from_email or "").strip().lower()
+    rt_email_l = (rt_email or "").strip().lower()
+    from_name_l = (from_name or "").strip().lower()
+
+    #  If From email is a known list alias -> prefer Reply-To (if present)
+    #  If From name contains " via " -> prefer Reply-To (if present)
+    #  If Reply-To exists and is not a list alias -> prefer Reply-To
+    use_reply_to = False
+    if rt_email_l:
+        if from_email_l in list_aliases:
+            use_reply_to = True
+        elif " via " in from_name_l:
+            use_reply_to = True
+        elif rt_email_l not in list_aliases:
+            # Often true when list forwards to a real user
+            use_reply_to = True
+
+    # Choose
+    if use_reply_to:
+        return rt_name or rt_email, rt_email or from_email
+    return from_name or from_email, from_email or rt_email
+
+
+def _parse_sender(from_header: str, reply_to_header: str = ""):
+    # Prefer a real person over a list alias when possible
+    chosen_name, chosen_email = _pick_personal_sender(from_header, reply_to_header)
+
+    # Derive display names
+    name_clean = re.sub(r"[\"']", "", (chosen_name or "")).strip()
     parts = [p for p in re.split(r"\s+", name_clean) if p]
 
     first = normalize_first_name(parts[0]) if parts else ""
     last_initial = normalize_last_initial(parts[1] if len(parts) > 1 else "")
 
-    return first, last_initial, email
+    return first, last_initial, (chosen_email or "").strip()
 
 
 def _clean_answer(body_text: str) -> str:
@@ -315,6 +349,7 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
 
             subject = hget("Subject", "")
             from_header = hget("From", "")
+            reply_to_header = hget("Reply-To", "")
             date_header = hget("Date", "")
             internal_ms = message.get("internalDate")
 
@@ -328,7 +363,7 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
                 log(f"⏭️ Skipping message {msg_id}: unparseable Date/internalDate")
                 continue
 
-            first_name, last_initial, email_addr = _parse_sender(from_header)
+            first_name, last_initial, email_addr = _parse_sender(from_header, reply_to_header)
             body_text = _extract_plaintext(payload)
             body_text = _clean_answer(body_text)
 
