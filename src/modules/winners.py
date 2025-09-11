@@ -212,11 +212,15 @@ def populate_winners_tab(sheet):
                 continue
             if g["start_dt"] <= s["dt"] <= g["end_dt"]:
                 if grading.is_marked_correct(s):
-                    if s["First Name"] and s["Last Name Initial"] and s["Email"]:
+                       if s["First Name"] and s["Email"]:
                         correct_entries.append(s)
 
         def display_name(e):
-            return f"{e['First Name']} {e['Last Name Initial']}."
+            last_initial = (e.get('Last Name Initial') or "").strip()
+            if last_initial:
+                return f"{e['First Name']} {last_initial}."
+            else:
+                return e['First Name']
 
         # Sort by display name first
         correct_entries_sorted = sorted(correct_entries, key=lambda e: display_name(e).lower())
