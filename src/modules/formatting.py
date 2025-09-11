@@ -14,29 +14,70 @@ def _sleep_backoff(attempt, base=0.8, cap=16.0):
     time.sleep(delay)
 
 def _safe_get_all_values(ws, tries=7):
+    from modules.logging_utils import log_quota_issue, log_error_with_fix
+    
     for attempt in range(tries):
         try:
             return ws.get_all_values()
         except APIError as e:
             msg = str(e).lower()
-            if ("quota exceeded" in msg or "rate limit" in msg or " 429" in msg or
-                getattr(getattr(e, "response", None), "status_code", None) in (429, 500, 502, 503, 504)):
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            
+            if status_code == 429 or "quota exceeded" in msg or "rate limit" in msg:
                 if attempt < tries - 1:
-                    _sleep_backoff(attempt)
+                    # Progressive delays: 30s, 90s, 180s, 300s (5min), 600s (10min)
+                    if "per minute" in msg:
+                        wait_time = 90 + (attempt * 60)  # 90s, 150s, 210s, 270s, 330s
+                    else:
+                        wait_time = 30 + (attempt * 30)  # 30s, 60s, 90s, 120s, 150s
+                    
+                    log_quota_issue("reading spreadsheet", wait_time, attempt + 1, tries)
+                    time.sleep(wait_time)
                     continue
+                else:
+                    log_error_with_fix(
+                        f"Google Sheets API quota exhausted after {tries} attempts",
+                        "Wait 10-15 minutes before running again, or contact admin to check Google Cloud quotas"
+                    )
+            elif status_code in (500, 502, 503, 504) and attempt < tries - 1:
+                wait_time = min(16.0, 2 ** attempt)
+                log_quota_issue("server error recovery", int(wait_time), attempt + 1, tries)
+                time.sleep(wait_time)
+                continue
+            
             raise
 
 def _safe_update_range(ws, range_a1, values, value_input_option="USER_ENTERED", tries=7):
+    from modules.logging_utils import log_quota_issue, log_error_with_fix
+    
     for attempt in range(tries):
         try:
             return ws.update(range_a1, values, value_input_option=value_input_option)
         except APIError as e:
             msg = str(e).lower()
-            if ("quota exceeded" in msg or "rate limit" in msg or " 429" in msg or
-                getattr(getattr(e, "response", None), "status_code", None) in (429, 500, 502, 503, 504)):
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            
+            if status_code == 429 or "quota exceeded" in msg or "rate limit" in msg:
                 if attempt < tries - 1:
-                    _sleep_backoff(attempt)
+                    if "per minute" in msg:
+                        wait_time = 120 + (attempt * 60)  # 120s, 180s, 240s, 300s, 360s
+                    else:
+                        wait_time = 45 + (attempt * 30)   # 45s, 75s, 105s, 135s, 165s
+                    
+                    log_quota_issue("updating spreadsheet", wait_time, attempt + 1, tries)
+                    time.sleep(wait_time)
                     continue
+                else:
+                    log_error_with_fix(
+                        f"Google Sheets write quota exhausted after {tries} attempts",
+                        "Wait 15-20 minutes before running again, or process data in smaller batches"
+                    )
+            elif status_code in (500, 502, 503, 504) and attempt < tries - 1:
+                wait_time = min(16.0, 2 ** attempt)
+                log_quota_issue("server error recovery", int(wait_time), attempt + 1, tries)
+                time.sleep(wait_time)
+                continue
+            
             raise
 
 def _col_letter(n: int) -> str:

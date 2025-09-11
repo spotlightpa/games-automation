@@ -368,7 +368,6 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
             body_text = _clean_answer(body_text)
 
             if _looks_like_digest_or_moderator(subject, email_addr, body_text):
-                log(f"⏭️ Skipping moderator/digest: {subject[:80]}")
                 continue
 
             subj_clean = (subject or "").strip()
