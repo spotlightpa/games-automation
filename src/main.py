@@ -5,6 +5,7 @@ from helpers.sheet_ratelimit import install_gspread_backoff
 load_dotenv()
 install_gspread_backoff()
 
+from modules.logging_utils import log_quota_wait_with_progress
 from modules.formatting import reformat_first_names, reformat_last_initials, reformat_submission_timestamps
 from modules import grading, mail
 from modules.winners import populate_winners_tab
@@ -33,6 +34,7 @@ if __name__ == "__main__":
         
         # Wait between Gmail and Sheets APIs to avoid quota conflicts
         log("⏸️ Waiting 2 minutes to avoid API quota conflicts between Gmail and Sheets...")
+        log_quota_wait_with_progress("API quota buffer", 120, 1, 1)
         time.sleep(120)
         
         # Format data

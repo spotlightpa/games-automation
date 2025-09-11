@@ -440,7 +440,18 @@ def grade_submissions_for_sheet(sheet_name: str):
         candidates = by_game.get(game_type.lower(), [])
         match = next((r for r in candidates if r["start_dt"] <= sub_dt <= r["end_dt"]), None)
         if not match:
-            log(f"⏭️ Row {i}: No matching {game_type} window for {ts_raw}")
+            # Only log first few missing windows to avoid spam
+            if not hasattr(log, '_missing_window_count'):
+                log._missing_window_count = {}
+            if game_type not in log._missing_window_count:
+                log._missing_window_count[game_type] = 0
+
+            if log._missing_window_count[game_type] < 3:
+                log(f"⏭️ Row {i}: No matching {game_type} window for {ts_raw}")
+                log._missing_window_count[game_type] += 1
+            elif log._missing_window_count[game_type] == 3:
+                log(f"⏭️ ... and more rows missing {game_type} windows (suppressing further messages)")
+                log._missing_window_count[game_type] += 1
             continue
 
         grading_prompt = match["grading"]

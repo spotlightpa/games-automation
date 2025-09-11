@@ -18,6 +18,75 @@ from modules.auth import get_credentials
 
 client, sheet, ws = get_sheet_and_ws()
 
+def _safe_row_values(ws, row, tries=7):
+    """Safe wrapper for getting row values with quota retry logic"""
+    import time
+    from gspread.exceptions import APIError
+    from modules.logging_utils import log_quota_wait_with_progress, log_error_with_fix
+    
+    for attempt in range(tries):
+        try:
+            return ws.row_values(row)
+        except APIError as e:
+            msg = str(e).lower()
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            
+            if status_code == 429 or "quota exceeded" in msg or "rate limit" in msg:
+                if attempt < tries - 1:
+                    if "per minute" in msg:
+                        wait_time = 90 + (attempt * 60)
+                    else:
+                        wait_time = 30 + (attempt * 30)
+                    
+                    log_quota_wait_with_progress("reading worksheet headers", wait_time, attempt + 1, tries)
+                    continue
+                else:
+                    log_error_with_fix(
+                        f"Google Sheets quota exhausted in mail module after {tries} attempts",
+                        "Wait 15-20 minutes before running again. The system hit Google's API limits."
+                    )
+            elif status_code in (500, 502, 503, 504) and attempt < tries - 1:
+                wait_time = min(16.0, 2 ** attempt)
+                time.sleep(wait_time)
+                continue
+            
+            raise
+
+def _safe_get_all_values_mail(ws, tries=7):
+    """Safe wrapper for getting all values with quota retry logic"""
+    import time
+    from gspread.exceptions import APIError
+    from modules.logging_utils import log_quota_wait_with_progress, log_error_with_fix
+    
+    for attempt in range(tries):
+        try:
+            return ws.get_all_values()
+        except APIError as e:
+            msg = str(e).lower()
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            
+            if status_code == 429 or "quota exceeded" in msg or "rate limit" in msg:
+                if attempt < tries - 1:
+                    if "per minute" in msg:
+                        wait_time = 90 + (attempt * 60)
+                    else:
+                        wait_time = 30 + (attempt * 30)
+                    
+                    log_quota_wait_with_progress("reading worksheet data", wait_time, attempt + 1, tries)
+                    continue
+                else:
+                    log_error_with_fix(
+                        f"Google Sheets quota exhausted in mail module after {tries} attempts",
+                        "Wait 15-20 minutes before running again. The system hit Google's API limits."
+                    )
+            elif status_code in (500, 502, 503, 504) and attempt < tries - 1:
+                wait_time = min(16.0, 2 ** attempt)
+                time.sleep(wait_time)
+                continue
+            
+            raise
+
+
 _TS_FMT = "%m/%d/%Y %I:%M %p"
 
 
@@ -192,7 +261,7 @@ def _looks_like_digest_or_moderator(subject: str, from_email: str, body_text: st
 
 
 def _ensure_submission_headers(ws_sub):
-    headers = ws_sub.row_values(1)
+    headers = _safe_row_values(ws_sub, 1)
     needed = [
         "Game", "Timestamp", "First Name", "Last Name Initial",
         "Email", "Answer", "AI Grade", "AI Confidence", "Override", "Link"
@@ -221,7 +290,7 @@ def _ensure_submission_headers(ws_sub):
 
 
 def _load_existing_keys(ws_sub, headers):
-    all_rows = ws_sub.get_all_values()
+    all_rows = _safe_get_all_values_mail(ws_sub)
     keys = set()
     key_to_row = {}
     for row_idx, r in enumerate(all_rows[2:], start=3):
@@ -243,7 +312,17 @@ def _load_existing_keys(ws_sub, headers):
 def _next_empty_row(ws_sub, num_cols: int):
     last = 0
     last_col_letter = _col_letter(num_cols)
-    data = ws_sub.get(f"A:{last_col_letter}")
+    for attempt in range(7):
+        try:
+            data = ws_sub.get(f"A:{last_col_letter}")
+            break
+        except APIError as e:
+            from modules.logging_utils import log_quota_wait_with_progress
+            if attempt < 6 and ("429" in str(e) or "quota exceeded" in str(e).lower()):
+                wait_time = 90 + (attempt * 60)
+                log_quota_wait_with_progress("checking worksheet size", wait_time, attempt + 1, 7)
+                continue
+            raise
     for i, row in enumerate(data, start=1):
         if any((cell or "").strip() for cell in row):
             last = i
