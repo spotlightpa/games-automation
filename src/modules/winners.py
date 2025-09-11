@@ -2,6 +2,7 @@ import os
 import time
 import random
 from dateutil import parser
+from datetime import datetime
 from gspread.exceptions import APIError
 
 from modules import grading
@@ -212,7 +213,7 @@ def populate_winners_tab(sheet):
                 continue
             if g["start_dt"] <= s["dt"] <= g["end_dt"]:
                 if grading.is_marked_correct(s):
-                       if s["First Name"] and s["Email"]:
+                    if s["First Name"] and s["Email"]:
                         correct_entries.append(s)
 
         def display_name(e):
@@ -237,6 +238,15 @@ def populate_winners_tab(sheet):
                 winners_emails_sorted.append((e["Email"] or "").strip())
                 winners_entries_sorted.append(e)
                 seen.add(n)
+
+        correct_entries_by_time = sorted(correct_entries, key=lambda e: e["dt"] if e["dt"] else datetime.min.replace(tzinfo=e["dt"].tzinfo if e["dt"] else None))
+        winners_ordered = []
+        seen_ordered = set()
+        for e in correct_entries_by_time:
+            n = display_name(e)
+            if n not in seen_ordered:
+                winners_ordered.append(n)
+                seen_ordered.add(n)
 
         # Winner emails: alphabetize and dedupe case-insensitively
         email_map = {}
@@ -297,6 +307,7 @@ def populate_winners_tab(sheet):
             "Swag Winner": swag_name,
             "Swag Winner Email": swag_email,
             "Winners": ", ".join(winners_names_sorted),
+            "Winner Ordered": ", ".join(winners_ordered),
             "Winner Emails": ", ".join(winner_emails_alpha),
             "Full Text": full_text,
         }
