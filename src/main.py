@@ -26,13 +26,13 @@ if __name__ == "__main__":
     mail.fetch_emails_for_label(label_id_env="RIDDLE_LABEL_ID", game_name="Riddler", fetch_all=True)
     mail.fetch_emails_for_label(label_id_env="SCRAMBLER_LABEL_ID", game_name="Scrambler", fetch_all=True)
 
-    time.sleep(0.5)
+    time.sleep(70)
 
     reformat_first_names(sheet)
     reformat_last_initials(sheet)
     reformat_submission_timestamps(sheet)
 
-    time.sleep(0.5)
+    time.sleep(70)
 
     format_and_populate_all()
     log("✅ Automation completed successfully.")
