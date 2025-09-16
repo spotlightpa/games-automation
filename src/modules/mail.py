@@ -450,17 +450,16 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
                 continue
 
             subj_clean = (subject or "").strip()
-            if subj_clean:
-                if body_text:
-                    body_text = f"Subject: {subj_clean}\n\n{body_text}"
+            # If the email has no body, try to treat the subject as the answer.
+            if not body_text and subj_clean:
+                guess = _extract_answer_from_subject(subj_clean, game_name)
+                if guess:
+                    body_text = f"Subject: {subj_clean}\n\n{guess}"
+                    log(f"✳️ Used subject as answer for {email_addr}: {subj_clean[:80]}")
                 else:
                     body_text = f"Subject: {subj_clean}"
-
-            if not body_text and subject:
-                guess = _extract_answer_from_subject(subject, game_name)
-                if guess:
-                    body_text = f"Subject: {subject.strip()}\n\n{guess}"
-                    log(f"✳️ Used subject as answer for {email_addr}: {subject[:80]}")
+            elif subj_clean and body_text:
+                body_text = f"Subject: {subj_clean}\n\n{body_text}"
 
             # normalized answer for dedupe key
             ans_for_key = _normalize_answer_for_key(body_text)
