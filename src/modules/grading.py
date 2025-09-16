@@ -194,7 +194,17 @@ def generate_grading_logic(game_type: str, question: str, answer: str, existing_
     Returns the short grading logic string that gets pasted into the sheet.
     (We keep the long, explicit instructions internally in grade_submission_entry.)
     """
-    if (game_type or "").strip().lower() == "scrambler":
+    game_type_lower = (game_type or "").strip().lower()
+    
+    if game_type_lower == "scrambler":
+        display_list, _ = _parse_scrambler_answer_list(answer)
+        if not display_list:
+            return f"Accepted answer: must use all and only the letters from {question}."
+        if len(display_list) == 1:
+            return f"Accepted answer: {display_list[0]}"
+        return f"Accepted answers: {', '.join(display_list)}"
+    
+    elif game_type_lower == "puzzler":
         display_list, _ = _parse_scrambler_answer_list(answer)
         if not display_list:
             return f"Accepted answer: must use all and only the letters from {question}."
@@ -221,7 +231,6 @@ Provide grading logic:""".strip()
         global total_token_cost
         total_token_cost += log_token_usage(usage)
     return text
-
 
 def _parse_grade_confidence(text: str):
     m_grade = re.search(r"Correctness:\s*(Correct|Incorrect)", text, flags=re.IGNORECASE)
