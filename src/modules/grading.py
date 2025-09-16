@@ -252,23 +252,28 @@ def grade_submission_entry(grading_prompt, user_answer):
 
     prompt = f"""{grading_prompt.strip()}
 
-You are grading a riddle submission that was copied from an email. The raw text may contain the user's answer plus non-answer content (e.g., signatures, legal disclaimers, quotes, addresses/phone numbers, URLs, reply headers, or other footers).
+You are grading a submission that was copied from an email. The text may include a subject line, reply/forward headers, signatures, link previews, and other non-answer content (such as email addresses/phone numbers, URLs, reply headers, other footers, or more).
 
 INSTRUCTIONS:
-1) Identify the candidate answer: the earliest, shortest span that clearly attempts to answer the puzzle.
-   • Prefer the first non-empty line(s) that read as an answer.
-   • Stop when you reach common signature/disclaimer markers (mobile signatures, lines like "Sent from", "Regards", "Thank you", dash separators, quoted-reply markers such as "On ... wrote:"), or when content shifts to contact info, legal notices, or unrelated quotations.
-   • If multiple guesses appear, grade the first clear answer.
-2) Judge correctness ONLY using the candidate answer — ignore any trailing non-answer content.
-3) Ignore case, punctuation, filler words, and trivial formatting differences. If the grading logic says to treat the answer in letters-only form, remove ALL non-letters (e.g., *, spaces, punctuation, markdown) before comparing.
-4) Be faithful to the riddle’s intended meaning per the grading logic.
+Identify whether the correct answer appears anywhere in the message (including the subject line), even if surrounded by extra words or formatting. Do not rely on rigid patterns. Use judgment.
+
+Rules for finding the candidate answer:
+• Consider the SUBJECT LINE. If the subject contains the correct answer (e.g., "Subject: Answer", "Re: Answer — Sept 16", "Answer"), that counts as a correct answer even if other content is present.
+• Otherwise, scan the earliest plausible answer in the body. Ignore obvious boilerplate (signatures like names/titles/phones/addresses, legal footers, quoted replies, URLs, and email addresses). 
+• Ignore case, punctuation, filler words, and trivial formatting differences. Remove all non-letter characters (e.g., *, spaces, punctuation, markdown) before comparing.
+• Treat leading phrases like "Answer:", "My guess is", "I think it's", "Final:", etc., as non-meaningful wrappers; focus on the core words after them.
+• Normalize for comparison: ignore case, punctuation, and spacing; remove non-letter characters. For multi-word answers, allow extra surrounding words but require the core tokens in order (e.g., "Streetwise" matches "Streetwise — my final answer").
+• If multiple accepted answers exist, it's correct if ANY one appears as above.
+• Be faithful to the riddle’s intended meaning per the grading logic.
+• If nothing clearly matches, mark Incorrect.
 
 Respond in this format exactly:
 Correctness: Correct or Incorrect
 Confidence: [number from 0 to 100]
 
-User's raw message:
+User's message:
 {user_answer}""".strip()
+
 
     text, usage = _openai_chat_safe(
         messages=[{"role": "user", "content": prompt}],
