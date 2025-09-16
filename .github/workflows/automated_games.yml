@@ -37,6 +37,7 @@ jobs:
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           RIDDLE_LABEL_ID: ${{ secrets.RIDDLE_LABEL_ID }}
           SCRAMBLER_LABEL_ID: ${{ secrets.SCRAMBLER_LABEL_ID }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
           source .venv/bin/activate
           python3 src/main.py
