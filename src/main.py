@@ -31,6 +31,7 @@ if __name__ == "__main__":
         log("📧 Phase 1: Fetching emails from Gmail...")
         mail.fetch_emails_for_label(label_id_env="RIDDLE_LABEL_ID", game_name="Riddler", fetch_all=True)
         mail.fetch_emails_for_label(label_id_env="SCRAMBLER_LABEL_ID", game_name="Scrambler", fetch_all=True)
+        mail.fetch_emails_for_label(label_id_env="PUZZLER_LABEL_ID", game_name="Puzzler", fetch_all=True)
         
         # Wait between Gmail and Sheets APIs to avoid quota conflicts
         log("⏸️ Waiting 2 minutes to avoid API quota conflicts between Gmail and Sheets...")
