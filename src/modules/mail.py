@@ -43,7 +43,7 @@ def _safe_row_values(ws, row, tries=7):
                 else:
                     log_error_with_fix(
                         f"Google Sheets quota exhausted in mail module after {tries} attempts",
-                        "Wait 15-20 minutes before running again. The system hit Google's API limits."
+                        "Wait 5-10 minutes before running again. The system hit Google's API limits."
                     )
             elif status_code in (500, 502, 503, 504) and attempt < tries - 1:
                 wait_time = min(16.0, 2 ** attempt)
@@ -77,7 +77,7 @@ def _safe_get_all_values_mail(ws, tries=7):
                 else:
                     log_error_with_fix(
                         f"Google Sheets quota exhausted in mail module after {tries} attempts",
-                        "Wait 15-20 minutes before running again. The system hit Google's API limits."
+                        "Wait 5-10 minutes before running again. The system hit Google's API limits."
                     )
             elif status_code in (500, 502, 503, 504) and attempt < tries - 1:
                 wait_time = min(16.0, 2 ** attempt)
