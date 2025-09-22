@@ -8,7 +8,9 @@ from modules.logging_utils import log
 from modules.auth import get_openai_client, GENERIC_GRADING_INSTRUCTIONS
 from modules.auth import get_credentials
 from helpers.tokens import log_token_usage
-
+from helpers.improved_rate_limiting import (
+    safe_get_all_values, safe_update_range, safe_batch_update
+)
 
 openai_client = get_openai_client()
 client = gspread.authorize(get_credentials())
@@ -88,13 +90,10 @@ def _parse_scrambler_answer_list(answer: str):
 
 
 def build_games_index():
-    """
-    Returns a list of dicts for each playable row in Games with parsed datetimes.
-    Keys: game, start_dt, end_dt, question, answer, grading, row_number
-    """
-    all_rows = ws.get_all_values()
+    all_rows = safe_get_all_values(ws, "reading Games data for indexing")
     if not all_rows:
         return []
+        
     headers = all_rows[0]
     hm, idx_of = _header_map_loose(headers)
 
@@ -107,7 +106,7 @@ def build_games_index():
 
     required_idx = [col_game, col_start, col_end, col_question, col_answer, col_grading]
     if any(i is None for i in required_idx):
-        log("❌ Missing one or more required columns in Games.")
+        log("Missing one or more required columns in Games worksheet.")
         return []
 
     index = []
@@ -156,44 +155,37 @@ def find_game_for_submission(game_type: str, submission_dt, games_index):
 
 
 def _openai_chat_safe(messages, model="gpt-4o", temperature=0, max_tokens=250):
-    try:
-        resp = openai_client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        text = resp.choices[0].message.content.strip()
-        usage = getattr(resp, "usage", None)
-        return text, usage
-    except Exception as e1:
+    attempt = 0
+    while True:
+        attempt += 1
         try:
-            resp = openai_client.responses.create(
-                model="gpt-4o-mini",
-                input=messages[-1]["content"],
+            resp = openai_client.chat.completions.create(
+                model=model,
+                messages=messages,
                 temperature=temperature,
-                max_output_tokens=max_tokens,
+                max_tokens=max_tokens,
             )
-            text = ""
-            if hasattr(resp, "output") and resp.output:
-                text = "".join(
-                    getattr(item, "content", "")
-                    for item in resp.output
-                    if getattr(item, "type", "") == "output_text"
-                ).strip()
-            if not text and hasattr(resp, "output_text"):
-                text = resp.output_text.strip()
+            text = resp.choices[0].message.content.strip()
             usage = getattr(resp, "usage", None)
             return text, usage
-        except Exception as e2:
-            raise RuntimeError(f"OpenAI call failed: {e1} // {e2}")
-
+        except Exception as e1:
+            try:
+                resp = openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                text = resp.choices[0].message.content.strip()
+                usage = getattr(resp, "usage", None)
+                return text, usage
+            except Exception as e2:
+                wait_time = min(300, 30 * attempt)  # Up to 5 minutes
+                log(f"OpenAI API error (attempt {attempt}), waiting {wait_time}s: {e1} // {e2}")
+                time.sleep(wait_time)
+                continue
 
 def generate_grading_logic(game_type: str, question: str, answer: str, existing_guidance: str = "") -> str:
-    """
-    Returns the short grading logic string that gets pasted into the sheet.
-    (We keep the long, explicit instructions internally in grade_submission_entry.)
-    """
     game_type_lower = (game_type or "").strip().lower()
     
     if game_type_lower == "scrambler":
@@ -264,7 +256,7 @@ Rules for finding the candidate answer:
 • Treat leading phrases like "Answer:", "My guess is", "I think it's", "Final:", etc., as non-meaningful wrappers; focus on the core words after them.
 • Normalize for comparison: ignore case, punctuation, and spacing; remove non-letter characters. For multi-word answers, allow extra surrounding words but require the core tokens in order (e.g., "Streetwise" matches "Streetwise — my final answer").
 • If multiple accepted answers exist, it's correct if ANY one appears as above.
-• Be faithful to the riddle’s intended meaning per the grading logic.
+• Be faithful to the riddle's intended meaning per the grading logic.
 • If nothing clearly matches, mark Incorrect.
 
 Respond in this format exactly:
@@ -273,7 +265,6 @@ Confidence: [number from 0 to 100]
 
 User's message:
 {user_answer}""".strip()
-
 
     text, usage = _openai_chat_safe(
         messages=[{"role": "user", "content": prompt}],
@@ -286,19 +277,15 @@ User's message:
 
     grade, confidence = _parse_grade_confidence(text)
     if grade == "Uncertain":
-        log(f"⚠️ AI response could not be parsed:\n{text}")
+        log(f"AI response could not be parsed: {text}")
     return grade, confidence
 
-
 def populate_ai_grading_prompts():
-    """
-    Ensure every playable Games row has an AI Grading Prompt.
-    Batched updates to avoid per-cell writes.
-    """
-    all_rows = ws.get_all_values()
+    all_rows = safe_get_all_values(ws, "reading Games data for grading prompts")
     if not all_rows:
-        log("ℹ️ No rows in Games.")
+        log("No rows in Games worksheet.")
         return
+        
     headers = all_rows[0]
     hm, idx_of = _header_map_loose(headers)
     total_rows = len(all_rows)
@@ -309,7 +296,7 @@ def populate_ai_grading_prompts():
     grading_idx = idx_of("AI Grading Prompt", "AI Grading Instructions", "Grading Prompt")
 
     if grading_idx is None:
-        log("❌ 'AI Grading Prompt' column not found.")
+        log("'AI Grading Prompt' column not found in Games worksheet.")
         return
 
     pending = []  # list of (row_number, final_output)
@@ -328,7 +315,7 @@ def populate_ai_grading_prompts():
         if existing_guidance.lower().startswith("ai:"):
             continue
 
-        log(f"⚙️ Generating grading logic for row {row_number} ({game})...")
+        log(f"Generating grading logic for row {row_number} ({game})...")
         grading_logic = generate_grading_logic(
             game_type=game,
             question=question,
@@ -336,17 +323,16 @@ def populate_ai_grading_prompts():
             existing_guidance=existing_guidance
         )
         if not grading_logic:
-            log(f"⚠️ Row {row_number}: No grading logic generated.")
+            log(f"Row {row_number}: No grading logic generated.")
             continue
 
         final_output = f"{existing_guidance.strip()}\nAI: {grading_logic}" if existing_guidance else f"AI: {grading_logic}"
         pending.append((row_number, final_output.strip()))
 
     if not pending:
-        log("✅ All Games rows already have AI grading prompts.")
+        log("All Games rows already have AI grading prompts.")
         return
 
-    # Coalesce into contiguous blocks in the grading column
     pending.sort(key=lambda x: x[0])
     blocks = []
     start = end = pending[0][0]
@@ -369,34 +355,29 @@ def populate_ai_grading_prompts():
             "values": [[v] for v in values]
         })
 
-    ws.batch_update(ranges, value_input_option="USER_ENTERED")
-    log(f"📝 Updated grading logic for {sum(len(b[2]) for b in blocks)} row(s) in Games.")
+    safe_batch_update(ws, ranges)
+    log(f"Updated grading logic for {sum(len(b[2]) for b in blocks)} row(s) in Games.")
 
-
-# Determines if a submission is marked correct, considering override first
 def is_marked_correct(entry):
     """
     A submission is considered correct if:
-    - Override is "correct", OR
+    - Override is "correct", OR  
     - Override is blank AND AI Grade is "correct"
     """
     override = entry.get("Override", "").strip().lower() if "Override" in entry else ""
     grade = entry.get("AI Grade", "").strip().lower() if "AI Grade" in entry else ""
     return override == "correct" or (not override and grade == "correct")
 
-
 def grade_submissions_for_sheet(sheet_name: str):
-    """
-    Grade submissions by matching each submission's (Game, Timestamp) to a Games window,
-    retrieving the AI Grading Prompt from that Games row (or generating it), and scoring.
-    """
-    log(f"Grading submissions in sheet: {sheet_name}")
+    log(f"Starting grading for sheet: {sheet_name}")
+    
     ws_sub = sheet.worksheet(sheet_name)
-
-    all_rows = ws_sub.get_all_values()
+    all_rows = safe_get_all_values(ws_sub, f"reading {sheet_name} data for grading")
+    
     if not all_rows:
-        log("ℹ️ No rows to grade.")
+        log("No rows to grade.")
         return
+        
     headers = all_rows[0]
 
     header_set = {(h or "").strip() for h in headers}
@@ -406,8 +387,8 @@ def grade_submissions_for_sheet(sheet_name: str):
             headers.append(col)
             changed = True
     if changed:
-        ws_sub.update("A1", [headers])
-        all_rows = ws_sub.get_all_values()
+        safe_update_range(ws_sub, "A1", [headers])
+        all_rows = safe_get_all_values(ws_sub, f"re-reading {sheet_name} headers after update")
         headers = all_rows[0]
 
     _, idx_of = _header_map_loose(headers)
@@ -418,12 +399,12 @@ def grade_submissions_for_sheet(sheet_name: str):
     conf_idx = idx_of("AI Confidence")
 
     if None in (game_idx, ts_idx, answer_idx, grade_idx, conf_idx):
-        log("❌ Submissions must have 'Game', 'Timestamp', and 'Answer' columns.")
+        log("Submissions must have 'Game', 'Timestamp', and 'Answer' columns.")
         return
 
     games_index = build_games_index()
     if not games_index:
-        log("❌ No playable Games rows indexed — nothing to grade.")
+        log("No playable Games rows indexed - nothing to grade.")
         return
 
     by_game = {}
@@ -432,8 +413,13 @@ def grade_submissions_for_sheet(sheet_name: str):
 
     data_rows = all_rows[2:]
     out_updates = []
+    processed = 0
 
     for i, row in enumerate(data_rows, start=3):
+        processed += 1
+        if processed % 50 == 0:  # Progress logging
+            log(f"Processed {processed} rows for grading...")
+            
         row = (row + [""] * len(headers))[:len(headers)]
 
         if (row[grade_idx] or "").strip():
@@ -448,41 +434,26 @@ def grade_submissions_for_sheet(sheet_name: str):
 
         sub_dt = _parse_dt_safe(ts_raw)
         if not sub_dt:
-            log(f"⚠️ Row {i}: Unparseable timestamp '{ts_raw}'")
+            log(f"Row {i}: Unparseable timestamp '{ts_raw}'")
             continue
 
         candidates = by_game.get(game_type.lower(), [])
         match = next((r for r in candidates if r["start_dt"] <= sub_dt <= r["end_dt"]), None)
         if not match:
-            # Only log first few missing windows to avoid spam
-            if not hasattr(log, '_missing_window_count'):
-                log._missing_window_count = {}
-            if game_type not in log._missing_window_count:
-                log._missing_window_count[game_type] = 0
-
-            if log._missing_window_count[game_type] < 3:
-                log(f"⏭️ Row {i}: No matching {game_type} window for {ts_raw}")
-                log._missing_window_count[game_type] += 1
-            elif log._missing_window_count[game_type] == 3:
-                log(f"⏭️ ... and more rows missing {game_type} windows (suppressing further messages)")
-                log._missing_window_count[game_type] += 1
             continue
 
         grading_prompt = match["grading"]
         if not grading_prompt or not grading_prompt.lower().startswith("ai:"):
-            # Build if empty; store back into Games
-            log(f"⚙️ Missing AI grading prompt in Games row {match['row_number']}, generating...")
+            log(f"Generating missing AI grading prompt for Games row {match['row_number']}...")
             logic = generate_grading_logic(match["game"], match["question"], match["answer"], grading_prompt or "")
             final_output = f"{grading_prompt.strip()}\nAI: {logic}" if grading_prompt else f"AI: {logic}"
-            ws.update_cell(match["row_number"], match["grading_col_1based"], final_output.strip())
+            
+            # Update the Games worksheet
+            col_letter = chr(64 + match["grading_col_1based"])
+            safe_update_range(ws, f"{col_letter}{match['row_number']}", [[final_output.strip()]])
             grading_prompt = final_output
 
-        try:
-            grade, confidence = grade_submission_entry(grading_prompt, user_answer)
-        except Exception as e:
-            log(f"❌ Row {i}: OpenAI grading failed: {e}")
-            grade, confidence = "Uncertain", "N/A"
-
+        grade, confidence = grade_submission_entry(grading_prompt, user_answer)
         out_updates.append((i, grade, confidence))
 
     if out_updates:
@@ -494,11 +465,12 @@ def grade_submissions_for_sheet(sheet_name: str):
         for r, g, c in out_updates:
             block[r - min_row][0] = g
             block[r - min_row][1] = c
-        ws_sub.update(
+            
+        safe_update_range(
+            ws_sub,
             f"{col_letter(grade_idx)}{min_row}:{col_letter(conf_idx)}{max_row}",
-            block,
-            value_input_option="USER_ENTERED"
+            block
         )
-        log(f"✅ Graded {len(out_updates)} rows in one batch.")
+        log(f"Successfully graded {len(out_updates)} submissions in one batch.")
     else:
-        log("ℹ️ No ungraded rows found.")
+        log("No ungraded submissions found.")

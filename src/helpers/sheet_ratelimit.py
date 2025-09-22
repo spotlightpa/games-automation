@@ -12,7 +12,8 @@ _last_request_ts = 0.0
 _lock = Lock()
 
 def _min_interval() -> float:
-    return float(os.getenv("SHEETS_MIN_INTERVAL", "1.0"))
+    # 6 seconds minimum between any API calls
+    return float(os.getenv("SHEETS_MIN_INTERVAL", "6.0"))
 
 def _pre_request_throttle():
     global _last_request_ts
@@ -32,17 +33,9 @@ def _parse_retry_after(value: str) -> float:
         return 0.0
 
 def _should_retry(exc: Exception) -> bool:
+    # Always retry API errors - we never give up
     if isinstance(exc, APIError):
-        try:
-            resp = exc.response
-            code = getattr(resp, "status_code", None)
-            if code in (429, 500, 502, 503, 504):
-                return True
-        except Exception:
-            pass
-        msg = str(exc).lower()
-        if "quota exceeded" in msg or "rate limit" in msg or " 429" in msg:
-            return True
+        return True
     return False
 
 def _retry_after_seconds(exc: Exception) -> float:
@@ -56,57 +49,103 @@ def _retry_after_seconds(exc: Exception) -> float:
                 return 0.0
     return 0.0
 
-class _BackoffHTTPClient(_http_mod.HTTPClient):
+class _NeverFailHTTPClient(_http_mod.HTTPClient):
     def request(self, method, url, **kwargs):
-        max_retries = int(os.getenv("SHEETS_MAX_RETRIES", "7"))
-        base = float(os.getenv("SHEETS_BACKOFF_BASE", "0.8"))
-        jitter = float(os.getenv("SHEETS_BACKOFF_JITTER", "0.25"))
-        cap = float(os.getenv("SHEETS_BACKOFF_CAP", "16"))
+        base = float(os.getenv("SHEETS_BACKOFF_BASE", "10.0"))   # Longer base delay
+        jitter = float(os.getenv("SHEETS_BACKOFF_JITTER", "2.0")) # More jitter
+        max_delay = float(os.getenv("SHEETS_BACKOFF_CAP", "1800"))  # 30 minute max
 
         attempt = 0
-        while True:
+        while True:  # Infinite retry loop
             _pre_request_throttle()
             try:
                 return super().request(method, url, **kwargs)
             except Exception as e:
-                if attempt >= max_retries or not _should_retry(e):
-                    raise
-                ra = _retry_after_seconds(e)
-                exp = min(cap, base * (2 ** attempt))
-                exp = max(0.0, exp + random.uniform(-jitter / 2, jitter / 2))
-                time.sleep(max(ra, exp))
                 attempt += 1
+                
+                if not _should_retry(e):
+                    # Even for non-API errors, wait and try again
+                    wait_time = min(max_delay, 30 * attempt)
+                    print(f"Non-API error (attempt {attempt}), waiting {wait_time}s: {e}")
+                    time.sleep(wait_time)
+                    continue
+                
+                # Calculate wait time based on error type
+                ra = _retry_after_seconds(e)
+                error_msg = str(e).lower()
+                
+                if "quota exceeded" in error_msg or "429" in str(e):
+                    # For quota errors, use very long delays
+                    if "per minute" in error_msg:
+                        wait_time = min(max_delay, 120 + (attempt * 60))  # 2min, 3min, 4min
+                    elif "per day" in error_msg:
+                        wait_time = max_delay  # Full 30 minutes
+                    else:
+                        wait_time = min(max_delay, 60 + (attempt * 30))   # 1min, 1.5min, 2min
+                else:
+                    # For other errors, use exponential backoff
+                    exp = min(max_delay, base * (2 ** min(attempt - 1, 10)))
+                    wait_time = max(ra, exp + random.uniform(-jitter / 2, jitter / 2))
+                
+                print(f"API error (attempt {attempt}), waiting {wait_time:.1f}s: {e}")
+                
+                # Break long waits into chunks so we can show progress
+                total_wait = wait_time
+                while total_wait > 0:
+                    chunk = min(30, total_wait)
+                    time.sleep(chunk)
+                    total_wait -= chunk
+                    if total_wait > 30:
+                        print(f"   Still waiting... {total_wait:.0f}s remaining")
 
 def install_gspread_backoff():
     global _PATCHED
     if _PATCHED:
         return
 
-    _http_mod.HTTPClient = _BackoffHTTPClient
+    _http_mod.HTTPClient = _NeverFailHTTPClient
 
+    # Also patch BatchHTTPClient if it exists
     BatchHTTPClient = getattr(_http_mod, "BatchHTTPClient", None)
     if BatchHTTPClient is not None:
-        class _BackoffBatchHTTPClient(BatchHTTPClient):
+        class _NeverFailBatchHTTPClient(BatchHTTPClient):
             def request(self, method, url, **kwargs):
-                max_retries = int(os.getenv("SHEETS_MAX_RETRIES", "7"))
-                base = float(os.getenv("SHEETS_BACKOFF_BASE", "0.8"))
-                jitter = float(os.getenv("SHEETS_BACKOFF_JITTER", "0.25"))
-                cap = float(os.getenv("SHEETS_BACKOFF_CAP", "16"))
+                base = float(os.getenv("SHEETS_BACKOFF_BASE", "10.0"))
+                jitter = float(os.getenv("SHEETS_BACKOFF_JITTER", "2.0"))
+                max_delay = float(os.getenv("SHEETS_BACKOFF_CAP", "1800"))
 
                 attempt = 0
-                while True:
+                while True:  # Infinite retry loop
                     _pre_request_throttle()
                     try:
                         return super().request(method, url, **kwargs)
                     except Exception as e:
-                        if attempt >= max_retries or not _should_retry(e):
-                            raise
-                        ra = _retry_after_seconds(e)
-                        exp = min(cap, base * (2 ** attempt))
-                        exp = max(0.0, exp + random.uniform(-jitter / 2, jitter / 2))
-                        time.sleep(max(ra, exp))
                         attempt += 1
+                        
+                        ra = _retry_after_seconds(e)
+                        error_msg = str(e).lower()
+                        
+                        if "quota exceeded" in error_msg or "429" in str(e):
+                            if "per minute" in error_msg:
+                                wait_time = min(max_delay, 120 + (attempt * 60))
+                            elif "per day" in error_msg:
+                                wait_time = max_delay
+                            else:
+                                wait_time = min(max_delay, 60 + (attempt * 30))
+                        else:
+                            exp = min(max_delay, base * (2 ** min(attempt - 1, 10)))
+                            wait_time = max(ra, exp + random.uniform(-jitter / 2, jitter / 2))
+                        
+                        print(f"Batch API error (attempt {attempt}), waiting {wait_time:.1f}s: {e}")
+                        
+                        total_wait = wait_time
+                        while total_wait > 0:
+                            chunk = min(30, total_wait)
+                            time.sleep(chunk)
+                            total_wait -= chunk
+                            if total_wait > 30:
+                                print(f"   Still waiting... {total_wait:.0f}s remaining")
 
-        _http_mod.BatchHTTPClient = _BackoffBatchHTTPClient
+        _http_mod.BatchHTTPClient = _NeverFailBatchHTTPClient
 
     _PATCHED = True
