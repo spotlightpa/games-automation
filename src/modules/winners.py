@@ -3,11 +3,12 @@ import time
 import random
 from dateutil import parser
 from datetime import datetime
-from gspread.exceptions import APIError
 
 from modules import grading
 from modules.logging_utils import log
-
+from helpers.improved_rate_limiting import (
+    safe_get_all_values, safe_update_range
+)
 
 def _parse_dt_safe(s: str):
     try:
@@ -15,64 +16,17 @@ def _parse_dt_safe(s: str):
     except Exception:
         return None
 
-
 def _fmt_dt(dt):
     s = dt.strftime("%m/%d/%Y %I:%M %p")
     return s.replace(" 0", " ", 1)
 
-
-def _sleep_backoff(attempt, base=0.8, cap=16.0):
-    delay = min(cap, base * (2 ** attempt))
-    time.sleep(delay)
-
-def _is_retryable(e: Exception) -> bool:
-    if isinstance(e, APIError):
-        code = getattr(getattr(e, "response", None), "status_code", None)
-        msg = str(e).lower()
-        if code in (429, 500, 502, 503, 504):
-            return True
-        if "quota exceeded" in msg or "rate limit" in msg or " 429" in msg:
-            return True
-    return False
-
-def _safe_get_all_values(ws, tries=7):
-    for attempt in range(tries):
-        try:
-            return ws.get_all_values()
-        except Exception as e:
-            if attempt < tries - 1 and _is_retryable(e):
-                _sleep_backoff(attempt)
-                continue
-            raise
-
-def _safe_row_values(ws, row, tries=7):
-    for attempt in range(tries):
-        try:
-            return ws.row_values(row)
-        except Exception as e:
-            if attempt < tries - 1 and _is_retryable(e):
-                _sleep_backoff(attempt)
-                continue
-            raise
-
-def _safe_update(ws, *, range_name=None, values=None, value_input_option="USER_ENTERED", tries=7):
-    for attempt in range(tries):
-        try:
-            return ws.update(range_name, values, value_input_option=value_input_option)
-        except Exception as e:
-            if attempt < tries - 1 and _is_retryable(e):
-                _sleep_backoff(attempt)
-                continue
-            raise
-
-
 def _load_previous_winner_emails(sheet):
     try:
         prev_ws = sheet.worksheet("Previous Winners")
+        rows = safe_get_all_values(prev_ws, "reading previous winners")
     except Exception:
         return set()
 
-    rows = _safe_get_all_values(prev_ws)
     if not rows:
         return set()
 
@@ -89,14 +43,14 @@ def _load_previous_winner_emails(sheet):
                 emails.add(e)
     return emails
 
-
-
 def populate_winners_tab(sheet):
+    log("Starting winner population...")
+    
     games_ws = sheet.worksheet("Games")
     subs_ws = sheet.worksheet("Submissions")
     winners_ws = sheet.worksheet("Winners")
 
-    games_raw = _safe_get_all_values(games_ws)
+    games_raw = safe_get_all_values(games_ws, "reading Games data for winners")
     if not games_raw:
         log("❌ Games sheet is empty.")
         return
@@ -135,7 +89,7 @@ def populate_winners_tab(sheet):
     # Deterministic ordering
     games.sort(key=lambda r: (r["game"].lower(), r["start_dt"]))
 
-    subs_raw = _safe_get_all_values(subs_ws)
+    subs_raw = safe_get_all_values(subs_ws, "reading Submissions data for winners")
     sub_headers = subs_raw[0] if subs_raw else []
     sh = {name.strip(): idx for idx, name in enumerate(sub_headers)}
     needed_sub_cols = ["Game", "Timestamp", "First Name", "Last Name Initial", "Email", "AI Grade", "Override"]
@@ -171,12 +125,13 @@ def populate_winners_tab(sheet):
 
     previous_winner_emails = _load_previous_winner_emails(sheet)
 
-    winner_headers = _safe_row_values(winners_ws, 1)
+    winner_headers_raw = safe_get_all_values(winners_ws, "reading Winners headers")
+    winner_headers = winner_headers_raw[0] if winner_headers_raw else []
     num_columns = len(winner_headers)
     wh = {name.strip(): idx for idx, name in enumerate(winner_headers)}
     has_swag_link_col = "Swag Winner Link" in wh
 
-    existing_rows = _safe_get_all_values(winners_ws)
+    existing_rows = winner_headers_raw
     existing_map = {}
     if existing_rows and len(existing_rows) >= 3:
         wh_existing = {name.strip(): idx for idx, name in enumerate(existing_rows[0])}
@@ -195,16 +150,20 @@ def populate_winners_tab(sheet):
     last_row = len(existing_rows)
     if last_row >= 3:
         last_col_letter = chr(64 + num_columns)
-        _safe_update(
+        safe_update_range(
             winners_ws,
-            range_name=f"A3:{last_col_letter}{last_row}",
-            values=[["" for _ in range(num_columns)] for _ in range(last_row - 2)],
-            value_input_option="USER_ENTERED"
+            f"A3:{last_col_letter}{last_row}",
+            [["" for _ in range(num_columns)] for _ in range(last_row - 2)]
         )
 
     rows_out = []
+    processed_games = 0
 
     for g in games:
+        processed_games += 1
+        if processed_games % 5 == 0:
+            log(f"Processed {processed_games} games for winner calculation...")
+            
         correct_entries = []
         for s in submissions:
             if (s["game"] or "").strip().lower() != g["game"].strip().lower():
@@ -319,11 +278,10 @@ def populate_winners_tab(sheet):
 
     if rows_out:
         last_col_letter = chr(64 + num_columns)
-        _safe_update(
+        safe_update_range(
             winners_ws,
-            range_name=f"A3:{last_col_letter}{2 + len(rows_out)}",
-            values=rows_out,
-            value_input_option="USER_ENTERED"
+            f"A3:{last_col_letter}{2 + len(rows_out)}",
+            rows_out
         )
 
-    log(f"✅ Populated {len(rows_out)} winner rows using time windows (previous-winner exclusion, swag link, and neatly formatted Full Text).")
+    log(f"Successfully populated {len(rows_out)} winner rows with time windows and swag selection.")
