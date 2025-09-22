@@ -16,76 +16,19 @@ from modules import config
 from helpers.sheets_client import get_sheet_and_ws
 from modules.auth import get_credentials
 
+from helpers.improved_rate_limiting import (
+    safe_get_all_values, safe_update_range, safe_append_rows, 
+    safe_batch_update, safe_get_worksheet, safe_row_values,
+    safe_get_range, wait_for_quota_reset
+)
+
 client, sheet, ws = get_sheet_and_ws()
 
-def _safe_row_values(ws, row, tries=7):
-    """Safe wrapper for getting row values with quota retry logic"""
-    import time
-    from gspread.exceptions import APIError
-    from modules.logging_utils import log_quota_wait_with_progress, log_error_with_fix
-    
-    for attempt in range(tries):
-        try:
-            return ws.row_values(row)
-        except APIError as e:
-            msg = str(e).lower()
-            status_code = getattr(getattr(e, "response", None), "status_code", None)
-            
-            if status_code == 429 or "quota exceeded" in msg or "rate limit" in msg:
-                if attempt < tries - 1:
-                    if "per minute" in msg:
-                        wait_time = 90 + (attempt * 60)
-                    else:
-                        wait_time = 30 + (attempt * 30)
-                    
-                    log_quota_wait_with_progress("reading worksheet headers", wait_time, attempt + 1, tries)
-                    continue
-                else:
-                    log_error_with_fix(
-                        f"Google Sheets quota exhausted in mail module after {tries} attempts",
-                        "Wait 5-10 minutes before running again. The system hit Google's API limits."
-                    )
-            elif status_code in (500, 502, 503, 504) and attempt < tries - 1:
-                wait_time = min(16.0, 2 ** attempt)
-                time.sleep(wait_time)
-                continue
-            
-            raise
+def _safe_row_values(ws, row):
+    return safe_row_values(ws, row)
 
-def _safe_get_all_values_mail(ws, tries=7):
-    """Safe wrapper for getting all values with quota retry logic"""
-    import time
-    from gspread.exceptions import APIError
-    from modules.logging_utils import log_quota_wait_with_progress, log_error_with_fix
-    
-    for attempt in range(tries):
-        try:
-            return ws.get_all_values()
-        except APIError as e:
-            msg = str(e).lower()
-            status_code = getattr(getattr(e, "response", None), "status_code", None)
-            
-            if status_code == 429 or "quota exceeded" in msg or "rate limit" in msg:
-                if attempt < tries - 1:
-                    if "per minute" in msg:
-                        wait_time = 90 + (attempt * 60)
-                    else:
-                        wait_time = 30 + (attempt * 30)
-                    
-                    log_quota_wait_with_progress("reading worksheet data", wait_time, attempt + 1, tries)
-                    continue
-                else:
-                    log_error_with_fix(
-                        f"Google Sheets quota exhausted in mail module after {tries} attempts",
-                        "Wait 5-10 minutes before running again. The system hit Google's API limits."
-                    )
-            elif status_code in (500, 502, 503, 504) and attempt < tries - 1:
-                wait_time = min(16.0, 2 ** attempt)
-                time.sleep(wait_time)
-                continue
-            
-            raise
-
+def _safe_get_all_values_mail(ws):
+    return safe_get_all_values(ws, "reading submission data")
 
 _TS_FMT = "%m/%d/%Y %I:%M %p"
 
@@ -230,7 +173,7 @@ def _clean_answer(body_text: str) -> str:
         r"^Get Outlook for.*$",
         r"^On .+ wrote:$",
         r"^From: .+$",
-        r"^—+$",
+        r"^—$",
         r"^-- $",
         r"^This message is being sent to you because you are a moderator of the group.*$",
     ]
@@ -285,7 +228,7 @@ def _ensure_submission_headers(ws_sub):
         changed = True
 
     if changed:
-        ws_sub.update("A1", [headers])
+        safe_update_range(ws_sub, "A1", [headers])
     return headers
 
 
@@ -312,22 +255,11 @@ def _load_existing_keys(ws_sub, headers):
 def _next_empty_row(ws_sub, num_cols: int):
     last = 0
     last_col_letter = _col_letter(num_cols)
-    for attempt in range(7):
-        try:
-            data = ws_sub.get(f"A:{last_col_letter}")
-            break
-        except APIError as e:
-            from modules.logging_utils import log_quota_wait_with_progress
-            if attempt < 6 and ("429" in str(e) or "quota exceeded" in str(e).lower()):
-                wait_time = 90 + (attempt * 60)
-                log_quota_wait_with_progress("checking worksheet size", wait_time, attempt + 1, 7)
-                continue
-            raise
+    data = safe_get_range(ws_sub, f"A:{last_col_letter}")
     for i, row in enumerate(data, start=1):
         if any((cell or "").strip() for cell in row):
             last = i
     return max(last + 1, 3)
-
 
 def list_labels():
     creds = get_credentials()
@@ -345,8 +277,7 @@ def list_labels():
         label_id = label.get("id")
         if label_id in public_label_ids:
             label_name = public_label_ids[label_id]
-            log(f"✔️ {label_name} Label — Name: {label['name']} | ID: {label_id}")
-
+            log(f"Label - Name: {label['name']} | ID: {label_id}")
 
 def _extract_answer_from_subject(subject: str, game_name: str) -> str:
     if not subject:
@@ -358,35 +289,38 @@ def _extract_answer_from_subject(subject: str, game_name: str) -> str:
     if g:
         m = re.search(rf"(?i)\b{re.escape(g)}\s*answer[:\-\s]*(.+)$", s)
         if m:
-            return m.group(1).strip(" '\"–—-").strip()
+            return m.group(1).strip(" '\"—–-").strip()
 
     m = re.search(r"(?i)\banswer[:\-\s]+(.+)$", s)
     if m:
-        return m.group(1).strip(" '\"–—-").strip()
+        return m.group(1).strip(" '\"—–-").strip()
 
     if len(s) <= 120:
-        return s.strip(" '\"–—-").strip()
+        return s.strip(" '\"—–-").strip()
 
     return ""
 
-
 def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = True):
+    log(f"Starting email fetch for {game_name}...")
+    
     env_label_id = os.getenv(label_id_env)
     default_label_id = config.RIDDLE_LABEL_ID if game_name.lower() == "riddler" else config.SCRAMBLER_LABEL_ID
     label_id = env_label_id or default_label_id
 
     if not label_id:
-        log(f"❌ Missing Gmail label id for {game_name}. Set {label_id_env} or update config.")
+        log(f"Missing Gmail label id for {game_name}. Set {label_id_env} or update config.")
         return
 
     creds = get_credentials()
     service = build("gmail", "v1", credentials=creds)
-    ws_sub = sheet.worksheet("Submissions")
+
+    ws_sub = safe_get_worksheet(sheet, "Submissions")
 
     try:
-        log(f"🗂️ Writing to worksheet: {ws_sub.title} (rows before: {len(ws_sub.get_all_values())})")
-    except Exception:
-        pass
+        all_values = safe_get_all_values(ws_sub, f"checking {game_name} worksheet size")
+        log(f"Writing to worksheet: {ws_sub.title} (rows before: {len(all_values)})")
+    except Exception as e:
+        log(f"Could not get initial row count: {e}")
 
     headers = _ensure_submission_headers(ws_sub)
     existing_keys, key_to_row = _load_existing_keys(ws_sub, headers)
@@ -398,13 +332,26 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
     pulled_total = 0
     page_num = 0
 
+    log(f"Starting Gmail API fetch for {game_name} (this may take some time)...")
+
     while True:
         page_num += 1
-        req = {"userId": "me", "labelIds": [label_id], "maxResults": 100}
+        req = {"userId": "me", "labelIds": [label_id], "maxResults": 50}
         if page_token:
             req["pageToken"] = page_token
 
-        results = service.users().messages().list(**req).execute()
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                time.sleep(2.0)
+                results = service.users().messages().list(**req).execute()
+                break
+            except Exception as e:
+                wait_time = min(300, 30 * attempt)  # Up to 5 minutes between Gmail retries
+                log(f"Gmail API error (attempt {attempt}), waiting {wait_time}s: {e}")
+                time.sleep(wait_time)
+                
         messages = results.get("messages", [])
         page_token = results.get("nextPageToken")
 
@@ -412,14 +359,29 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
             break
 
         rows_to_append = []
-        link_updates = []  # (row_idx, link)
+        link_updates = []
 
-        for msg in messages:
+        log(f"Processing page {page_num} with {len(messages)} messages...")
+
+        for msg_idx, msg in enumerate(messages, 1):
             msg_id = msg.get("id")
             if not msg_id:
                 continue
 
-            message = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
+            attempt = 0
+            while True:
+                attempt += 1
+                try:
+                    time.sleep(1.5)
+                    message = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
+                    break
+                except Exception as e:
+                    wait_time = min(120, 10 * attempt)
+                    log(f"Gmail message fetch error (attempt {attempt}) for message {msg_idx}/{len(messages)}: {e}")
+                    if "quota" in str(e).lower():
+                        wait_time = min(600, 60 * attempt)
+                    time.sleep(wait_time)
+
             payload = message.get("payload", {})
             headers_data = payload.get("headers", [])
 
@@ -439,7 +401,7 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
                 else:
                     ts_str = _parse_date_to_string(date_header) if date_header else ""
             except Exception:
-                log(f"⏭️ Skipping message {msg_id}: unparseable Date/internalDate")
+                log(f"Skipping message {msg_id}: unparseable Date/internalDate")
                 continue
 
             first_name, last_initial, email_addr = _parse_sender(from_header, reply_to_header)
@@ -450,32 +412,27 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
                 continue
 
             subj_clean = (subject or "").strip()
-            # If the email has no body, try to treat the subject as the answer.
             if not body_text and subj_clean:
                 guess = _extract_answer_from_subject(subj_clean, game_name)
                 if guess:
                     body_text = f"Subject: {subj_clean}\n\n{guess}"
-                    log(f"✳️ Used subject as answer for {email_addr}: {subj_clean[:80]}")
                 else:
                     body_text = f"Subject: {subj_clean}"
             elif subj_clean and body_text:
                 body_text = f"Subject: {subj_clean}\n\n{body_text}"
 
-            # normalized answer for dedupe key
             ans_for_key = _normalize_answer_for_key(body_text)
             if not ans_for_key:
-                log(f"⏭️ Skipping empty-body email from {email_addr} ({subject[:80]})")
                 continue
 
             msg_link = f"https://mail.google.com/mail/u/0/#all/{msg_id}"
 
             key = (game_name.strip().lower(), (email_addr or "").strip().lower(), ts_str, ans_for_key)
             if key in existing_keys:
-                # backfill Link if empty
                 row_idx = key_to_row.get(key)
                 if row_idx:
                     try:
-                        curr = ws_sub.get(f"{_col_letter(link_col_idx+1)}{row_idx}:{_col_letter(link_col_idx+1)}{row_idx}")
+                        curr = safe_get_range(ws_sub, f"{_col_letter(link_col_idx+1)}{row_idx}:{_col_letter(link_col_idx+1)}{row_idx}")
                         curr_val = curr[0][0] if curr and curr[0] else ""
                     except Exception:
                         curr_val = ""
@@ -501,32 +458,29 @@ def fetch_emails_for_label(label_id_env: str, game_name: str, fetch_all: bool = 
             existing_keys.add(key)
 
         if rows_to_append:
-            try:
-                ws_sub.append_rows(rows_to_append, value_input_option="USER_ENTERED")
-                pulled_total += len(rows_to_append)
-                log(f"✅ Appended {len(rows_to_append)} {game_name} rows.")
-            except Exception as e:
-                log(f"❌ Append failed: {e}")
+            safe_append_rows(ws_sub, rows_to_append)
+            pulled_total += len(rows_to_append)
+            log(f"Successfully appended {len(rows_to_append)} {game_name} rows.")
 
         if link_updates:
-            try:
-                requests = []
-                link_col_letter = _col_letter(link_col_idx + 1)
-                for row_idx, link in link_updates:
-                    requests.append({
-                        "range": f"{link_col_letter}{row_idx}:{link_col_letter}{row_idx}",
-                        "values": [[link]]
-                    })
-                if requests:
-                    ws_sub.batch_update([{"range": r["range"], "values": r["values"]} for r in requests], value_input_option="USER_ENTERED")
-                    log(f"🔗 Backfilled {len(requests)} link(s) in one batch.")
-            except Exception as e:
-                log(f"⚠️ Link backfill batch failed: {e}")
-
+            requests = []
+            link_col_letter = _col_letter(link_col_idx + 1)
+            for row_idx, link in link_updates:
+                requests.append({
+                    "range": f"{link_col_letter}{row_idx}:{link_col_letter}{row_idx}",
+                    "values": [[link]]
+                })
+            if requests:
+                safe_batch_update(ws_sub, [{"range": r["range"], "values": r["values"]} for r in requests])
+                log(f"Backfilled {len(requests)} link(s) successfully.")
 
         if not fetch_all or not page_token:
             break
 
-        time.sleep(0.4)
+        log(f"Completed page {page_num}, waiting before next page...")
+        time.sleep(10.0)
 
-    log(f"📥 Pulled {pulled_total} {game_name} submission(s).")
+    log(f"Completed! Pulled {pulled_total} {game_name} submission(s) total.")
+    
+    if pulled_total > 0:
+        wait_for_quota_reset()
